@@ -1,0 +1,22 @@
+[package]
+name = "chadlands-validator"
+version = "0.1.0"
+edition = "2021"
+description = "Deterministic validation layer for the Chadlands Markdown Vault"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+yaml-rust2 = "0.10"
+walkdir = "2"
+notify = "8"
+time = { version = "0.3", features = ["formatting", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

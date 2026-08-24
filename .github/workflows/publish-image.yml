@@ -1,0 +1,78 @@
+name: Publish OCI Image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6
+        with:
+          context: .
+          load: true
+          tags: chadlands-validator:publish
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Tag and publish image
+        id: publish
+        env:
+          TARGET_IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          target="${TARGET_IMAGE,,}"
+          short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
+          tags=("sha-${short_sha}")
+
+          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+            tags+=("latest")
+          fi
+
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF#refs/tags/}"
+            tags+=("$version" "${version#v}")
+          fi
+
+          for tag in "${tags[@]}"; do
+            docker tag chadlands-validator:publish "$target:$tag"
+            docker push "$target:$tag"
+          done
+
+          echo "image=$target" >> "$GITHUB_OUTPUT"
+          echo "verify_tag=sha-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Pull and verify published image
+        env:
+          PUBLISHED_IMAGE: ${{ steps.publish.outputs.image }}:${{ steps.publish.outputs.verify_tag }}
+        run: |
+          set -euo pipefail
+          docker image rm "$PUBLISHED_IMAGE"
+          docker pull "$PUBLISHED_IMAGE"
+          test "$(docker image inspect "$PUBLISHED_IMAGE" --format '{{.Config.User}}')" = "1000:1000"
+          docker run --rm "$PUBLISHED_IMAGE" --help

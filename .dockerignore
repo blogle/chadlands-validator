@@ -1,0 +1,8 @@
+.git
+.github
+target
+result
+result-*
+*.profraw
+*.profdata
+README.md
