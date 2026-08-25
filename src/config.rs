@@ -37,6 +37,7 @@ impl FieldRequirement {
 pub struct Config {
     pub report_path: String,
     pub boundary_path: String,
+    pub continuity_report_path: String,
     pub exclude_dirs: Vec<String>,
     pub protected_prefixes: Vec<String>,
     pub chronicle_dir: String,
@@ -55,6 +56,40 @@ pub struct Config {
     pub severity_overrides: HashMap<String, Severity>,
     pub max_findings_per_rule: usize,
     pub debounce_ms: u64,
+    // --- Source index configuration ---
+    pub direct_source_prefixes: Vec<String>,
+    pub player_speakers: Vec<String>,
+    pub dm_speakers: Vec<String>,
+    // --- Identity configuration ---
+    pub tracked_types: Vec<String>,
+    pub ignored_aliases: Vec<String>,
+    // --- Continuity thresholds ---
+    pub mention_dormancy_years: Option<f64>,
+    pub mention_dormancy_turns: Option<i64>,
+    pub material_dormancy_years: Option<f64>,
+    pub material_dormancy_turns: Option<i64>,
+    pub capability_dormancy_years: Option<f64>,
+    // --- Continuity rendered limits ---
+    pub max_resurfacing: usize,
+    pub max_receipts: usize,
+    pub max_capabilities: usize,
+    pub max_coverage_candidates: usize,
+    pub max_legacy_debt: usize,
+    // --- Technology configuration ---
+    pub portfolio_types: Vec<String>,
+    pub road_types: Vec<String>,
+    pub capability_types: Vec<String>,
+    pub legacy_technology_types: Vec<String>,
+    // --- Receipt authority ---
+    pub receipt_authority_player: Vec<String>,
+    pub receipt_authority_dm: Vec<String>,
+    // --- Coverage configuration ---
+    pub proper_name_min_occurrences: usize,
+    pub proper_name_min_distinct_messages: usize,
+    pub lifecycle_terms: Vec<String>,
+    pub role_phrases: Vec<String>,
+    // --- Frontmatter migration ---
+    pub migration_rules: Vec<String>,
 }
 
 impl Default for Config {
@@ -107,6 +142,7 @@ impl Default for Config {
                 "missing".into(),
                 "protected".into(),
                 "unknown".into(),
+                "unresolved".into(),
                 "not-applicable".into(),
             ],
         );
@@ -137,6 +173,46 @@ impl Default for Config {
                 "draft".into(),
             ],
         );
+        status_vocab.insert(
+            "index".into(),
+            vec![
+                "active".into(),
+                "active-navigation-current".into(),
+                "completed".into(),
+                "closed".into(),
+                "superseded".into(),
+                "historical".into(),
+                "deprecated".into(),
+                "draft".into(),
+                "provisional".into(),
+            ],
+        );
+        status_vocab.insert(
+            "register".into(),
+            vec![
+                "active".into(),
+                "in-progress".into(),
+                "completed".into(),
+                "closed".into(),
+                "superseded".into(),
+                "historical".into(),
+                "deprecated".into(),
+                "draft".into(),
+            ],
+        );
+        status_vocab.insert(
+            "doctrine".into(),
+            vec![
+                "active".into(),
+                "standing".into(),
+                "completed".into(),
+                "closed".into(),
+                "superseded".into(),
+                "historical".into(),
+                "deprecated".into(),
+                "draft".into(),
+            ],
+        );
 
         let mut type_to_vocab_class: HashMap<String, String> = HashMap::new();
         for (t, c) in [
@@ -144,10 +220,10 @@ impl Default for Config {
             ("god", "people"),
             ("institution", "institution"),
             ("service", "institution"),
-            ("index", "institution"),
-            ("register", "institution"),
-            ("ledger", "institution"),
-            ("doctrine", "institution"),
+            ("index", "index"),
+            ("register", "register"),
+            ("ledger", "register"),
+            ("doctrine", "doctrine"),
             ("policy", "institution"),
             ("project", "project"),
             ("venture", "project"),
@@ -162,6 +238,7 @@ impl Default for Config {
         Config {
             report_path: "00 System/Validation/Vault Health.md".into(),
             boundary_path: "00 System/State Boundary.md".into(),
+            continuity_report_path: "00 System/Validation/Continuity Report.md".into(),
             exclude_dirs: vec![
                 ".git".into(),
                 ".obsidian".into(),
@@ -197,6 +274,70 @@ impl Default for Config {
             severity_overrides: HashMap::new(),
             max_findings_per_rule: 25,
             debounce_ms: 750,
+            // Source index
+            direct_source_prefixes: vec![
+                "70 Sources/Telegram/Player".into(),
+            ],
+            player_speakers: vec![],
+            dm_speakers: vec!["the_mud_lounge_bot".into()],
+            // Identity
+            tracked_types: vec![
+                "person".into(),
+                "institution".into(),
+                "project".into(),
+                "venture".into(),
+                "technology-road".into(),
+                "capability".into(),
+                "technology-portfolio".into(),
+                "place".into(),
+                "polity".into(),
+            ],
+            ignored_aliases: Vec::new(),
+            // Continuity thresholds
+            mention_dormancy_years: Some(2.0),
+            mention_dormancy_turns: None,
+            material_dormancy_years: Some(3.0),
+            material_dormancy_turns: None,
+            capability_dormancy_years: Some(3.0),
+            // Continuity rendered limits
+            max_resurfacing: 12,
+            max_receipts: 12,
+            max_capabilities: 10,
+            max_coverage_candidates: 20,
+            max_legacy_debt: 20,
+            // Technology
+            portfolio_types: vec!["technology-portfolio".into()],
+            road_types: vec!["technology-road".into()],
+            capability_types: vec!["capability".into()],
+            legacy_technology_types: vec!["technology-node".into()],
+            // Receipt authority
+            receipt_authority_player: vec!["ACCEPT".into(), "PROGRESS".into(), "PARTIAL".into()],
+            receipt_authority_dm: vec![
+                "ACCEPT".into(),
+                "PROGRESS".into(),
+                "PARTIAL".into(),
+                "TERMINAL".into(),
+                "USE".into(),
+                "PORTFOLIO".into(),
+            ],
+            // Coverage
+            proper_name_min_occurrences: 2,
+            proper_name_min_distinct_messages: 2,
+            lifecycle_terms: vec![
+                "executing".into(),
+                "accepted".into(),
+                "priced".into(),
+                "completed".into(),
+                "terminal".into(),
+            ],
+            role_phrases: vec![
+                "lead".into(),
+                "owner".into(),
+                "second".into(),
+                "custodian".into(),
+            ],
+            // Migration
+            migration_rules: Vec::new(),
         }
     }
 }
@@ -322,6 +463,109 @@ impl Config {
             if n >= 0 {
                 cfg.debounce_ms = n as u64;
             }
+        }
+        // --- Source index ---
+        if let Some(v) = fm.get_str("continuity_report_path") {
+            cfg.continuity_report_path = v;
+        }
+        if let Some(d) = doc["direct_source_prefixes"].as_vec() {
+            cfg.direct_source_prefixes =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["player_speakers"].as_vec() {
+            cfg.player_speakers =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["dm_speakers"].as_vec() {
+            cfg.dm_speakers =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        // --- Identity ---
+        if let Some(d) = doc["tracked_types"].as_vec() {
+            cfg.tracked_types =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["ignored_aliases"].as_vec() {
+            cfg.ignored_aliases =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        // --- Continuity thresholds ---
+        if let Some(v) = doc["mention_dormancy_years"].as_f64() {
+            cfg.mention_dormancy_years = Some(v);
+        }
+        if let Some(v) = doc["mention_dormancy_turns"].as_i64() {
+            cfg.mention_dormancy_turns = Some(v);
+        }
+        if let Some(v) = doc["material_dormancy_years"].as_f64() {
+            cfg.material_dormancy_years = Some(v);
+        }
+        if let Some(v) = doc["material_dormancy_turns"].as_i64() {
+            cfg.material_dormancy_turns = Some(v);
+        }
+        if let Some(v) = doc["capability_dormancy_years"].as_f64() {
+            cfg.capability_dormancy_years = Some(v);
+        }
+        // --- Continuity rendered limits ---
+        if let Some(n) = doc["max_resurfacing"].as_i64() {
+            if n > 0 { cfg.max_resurfacing = n as usize; }
+        }
+        if let Some(n) = doc["max_receipts"].as_i64() {
+            if n > 0 { cfg.max_receipts = n as usize; }
+        }
+        if let Some(n) = doc["max_capabilities"].as_i64() {
+            if n > 0 { cfg.max_capabilities = n as usize; }
+        }
+        if let Some(n) = doc["max_coverage_candidates"].as_i64() {
+            if n > 0 { cfg.max_coverage_candidates = n as usize; }
+        }
+        if let Some(n) = doc["max_legacy_debt"].as_i64() {
+            if n > 0 { cfg.max_legacy_debt = n as usize; }
+        }
+        // --- Technology ---
+        if let Some(d) = doc["portfolio_types"].as_vec() {
+            cfg.portfolio_types =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["road_types"].as_vec() {
+            cfg.road_types =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["capability_types"].as_vec() {
+            cfg.capability_types =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["legacy_technology_types"].as_vec() {
+            cfg.legacy_technology_types =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        // --- Receipt authority ---
+        if let Some(d) = doc["receipt_authority_player"].as_vec() {
+            cfg.receipt_authority_player =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["receipt_authority_dm"].as_vec() {
+            cfg.receipt_authority_dm =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        // --- Coverage ---
+        if let Some(n) = doc["proper_name_min_occurrences"].as_i64() {
+            if n > 0 { cfg.proper_name_min_occurrences = n as usize; }
+        }
+        if let Some(n) = doc["proper_name_min_distinct_messages"].as_i64() {
+            if n > 0 { cfg.proper_name_min_distinct_messages = n as usize; }
+        }
+        if let Some(d) = doc["lifecycle_terms"].as_vec() {
+            cfg.lifecycle_terms =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        if let Some(d) = doc["role_phrases"].as_vec() {
+            cfg.role_phrases =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+        }
+        // --- Migration ---
+        if let Some(d) = doc["migration_rules"].as_vec() {
+            cfg.migration_rules =
+                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
         }
         Ok(cfg)
     }

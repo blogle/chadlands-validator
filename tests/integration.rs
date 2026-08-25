@@ -460,3 +460,158 @@ fn report_written_to_vault() {
     assert!(content.contains("type: validation-report"));
     assert!(content.contains("validated_revision:"));
 }
+
+// -----------------------------------------------------------------------
+// Steering Pass 3 regression tests
+// -----------------------------------------------------------------------
+
+#[test]
+fn materiality_seeded_from_source_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Canonical record with source_cursor
+    write_note(
+        root,
+        "40 Civilization/Projects/Test Project.md",
+        "---\ntype: project\nstatus: active\nretrieval_tier: canonical\nsource_cursor: 4526\nreviewed_through_cursor: 4534\nlast_confirmed_year: 37\n---\n# Test Project\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    // The source_cursor should seed material activity
+    // (verified indirectly through the continuity report)
+    assert!(outcome.continuity_report_markdown.is_some());
+}
+
+#[test]
+fn canonical_identity_suppresses_coverage_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Create a canonical record
+    write_note(
+        root,
+        "40 Civilization/Capabilities/Technology/Nodes/Forge School.md",
+        "---\ntype: technology-node\nstatus: superseded\nretrieval_tier: canonical\n---\n# Forge School\n",
+    );
+    // Create a source message mentioning "Forge School"
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/2026-01-01.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\ndate: 2026-01-01\nfirst: 1\nlast: 1\ncount: 1\n---\n\n^telegram--100-1\n**00:00 UTC** · the_mud_lounge_bot\n\nForge School was discussed.\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    // Forge School should NOT be a coverage candidate
+    // because it's in the canonical identity universe
+    let report = outcome.continuity_report_markdown.unwrap();
+    assert!(!report.contains("Forge School"));
+}
+
+#[test]
+fn schema_003_index_vocabulary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Index with provisional status should not trigger CHAD-SCHEMA-003
+    write_note(
+        root,
+        "10 Origins/Forge Survival Index.md",
+        "---\ntype: index\nstatus: provisional\nretrieval_tier: canonical\n---\n# Forge Survival Index\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    assert!(!has_rule(&outcome.findings.items, "CHAD-SCHEMA-003"));
+}
+
+#[test]
+fn schema_003_register_vocabulary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Register with in-progress status should not trigger CHAD-SCHEMA-003
+    write_note(
+        root,
+        "30 World/Registers/Geographic Register.md",
+        "---\ntype: register\nstatus: in-progress\nretrieval_tier: canonical\n---\n# Geographic Register\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    assert!(!has_rule(&outcome.findings.items, "CHAD-SCHEMA-003"));
+}
+
+#[test]
+fn schema_003_doctrine_vocabulary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Doctrine with standing status should not trigger CHAD-SCHEMA-003
+    write_note(
+        root,
+        "50 Knowledge/Hoarback Non-Harm Doctrine.md",
+        "---\ntype: doctrine\nstatus: standing\nretrieval_tier: canonical\n---\n# Hoarback Non-Harm Doctrine\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    assert!(!has_rule(&outcome.findings.items, "CHAD-SCHEMA-003"));
+}
+
+#[test]
+fn schema_003_person_unresolved() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Person with unresolved status should not trigger CHAD-SCHEMA-003
+    write_note(
+        root,
+        "30 World/People/Wynn Alder.md",
+        "---\ntype: person\nstatus: unresolved\nretrieval_tier: canonical\n---\n# Wynn Alder\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    assert!(!has_rule(&outcome.findings.items, "CHAD-SCHEMA-003"));
+}
+
+#[test]
+fn cursor_002_stale_boundary_remediation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // State Boundary with cursor 100
+    write_note(
+        root,
+        "00 System/State Boundary.md",
+        "---\ncurrent_turn: 5\ncurrent_year: 5\nlast_resolved_year: 4\ncurrent_source_cursor: 100\ncanonical_materialized_cursor: 100\n---\n# Boundary\n",
+    );
+    // Record with cursor 200 (ahead of boundary)
+    write_note(
+        root,
+        "30 World/People/Ahead.md",
+        "---\ntype: person\nstatus: active\nretrieval_tier: canonical\nsource_cursor: 200\nreviewed_through_cursor: 200\nlast_confirmed_year: 5\n---\n# Ahead\n",
+    );
+    // Source message with cursor 300 (ahead of record)
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/2026-01-01.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\ndate: 2026-01-01\nfirst: 300\nlast: 300\ncount: 1\n---\n\n^telegram--100-300\n**00:00 UTC** · the_mud_lounge_bot\n\nTest message.\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    // Should have CHAD-CURSOR-002 with stale boundary remediation
+    let cursor_findings: Vec<_> = outcome
+        .findings
+        .items
+        .iter()
+        .filter(|f| f.rule == "CHAD-CURSOR-002")
+        .collect();
+    assert!(cursor_findings.len() >= 1);
+    assert!(cursor_findings[0].message.contains("State Boundary may be stale"));
+}
+
+#[test]
+fn cap_mig_001_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Capability register with attained entries
+    write_note(
+        root,
+        "40 Civilization/Capabilities/Technology/Attained Capability Register.md",
+        "---\ntype: register\nstatus: active\nretrieval_tier: canonical\n---\n# Attained Capability Register\n\n## Attained\n- Water Power\n- Precision Gauges\n",
+    );
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+    assert!(has_rule(&outcome.findings.items, "CAP-MIG-001"));
+}

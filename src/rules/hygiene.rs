@@ -86,7 +86,28 @@ fn check_common_fields(ctx: &RuleContext, out: &mut Vec<Finding>) {
                 ));
             }
         }
-        if !note.fm().has("retrieval_tier") {
+
+        // Only require retrieval_tier on notes that are active canonical
+        // truth owners or runtime records. Skip:
+        // - Templates (90 Templates/)
+        // - Historical strategy-session artifacts (60 Steering/Sessions/)
+        // - Old audits/verification reports
+        // - Conventions/workflow files
+        // - Chronicle year records (folder semantics encode retrieval)
+        let path = &note.path;
+        let is_template = path.starts_with("90 Templates/");
+        let is_session = path.starts_with("60 Steering/Sessions/");
+        let is_audit = path.starts_with("00 System/Audit")
+            || path.starts_with("00 System/Verification")
+            || path.starts_with("00 System/Discrepancy");
+        let is_conventions = path.ends_with("/_conventions.md");
+        let is_chronicle = path.starts_with("20 Chronicle/");
+        let is_workflow = note.type_str().as_deref() == Some("system-workflow");
+
+        let skip_retrieval_tier =
+            is_template || is_session || is_audit || is_conventions || is_chronicle || is_workflow;
+
+        if !skip_retrieval_tier && !note.fm().has("retrieval_tier") {
             out.push(finding(
                 "CHAD-SCHEMA-002",
                 ctx.sev("CHAD-SCHEMA-002", Severity::Warn),

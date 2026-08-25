@@ -7,12 +7,19 @@
 //! its only vault write is the generated health report.
 
 pub mod boundary;
+pub mod capability;
 pub mod config;
+pub mod continuity;
+pub mod coverage;
 pub mod findings;
 pub mod frontmatter;
 pub mod manifest;
+pub mod migration;
+pub mod receipts;
 pub mod report;
 pub mod rules;
+pub mod source_index;
+pub mod technology;
 pub mod vault;
 pub mod watch;
 
@@ -27,6 +34,7 @@ pub struct ValidationOutcome {
     pub findings: Findings,
     pub files_checked: usize,
     pub report_markdown: String,
+    pub continuity_report_markdown: Option<String>,
 }
 
 /// Run a full validation over the vault.
@@ -61,11 +69,15 @@ pub fn validate_with_config_path(
         config,
     ));
 
+    // Build source index for continuity analysis
+    let source_idx = source_index::build(vault_root, &index, config, &boundary);
+
     let ctx = rules::RuleContext {
         index: &index,
         config,
         boundary: &boundary,
         manifests: &manifests,
+        source_index: Some(&source_idx),
     };
     items.extend(rules::run_all(&ctx));
     items.extend(rules::hygiene::check_protected_paths(
@@ -88,11 +100,15 @@ pub fn validate_with_config_path(
         previous.as_ref(),
     );
 
+    // Generate continuity report
+    let continuity_markdown = continuity::render(&boundary, &source_idx, config);
+
     Ok(ValidationOutcome {
         boundary,
         findings,
         files_checked: index.notes.len(),
         report_markdown,
+        continuity_report_markdown: Some(continuity_markdown),
     })
 }
 
@@ -115,5 +131,10 @@ pub fn validate_and_report_with_config_path(
     let outcome = validate_with_config_path(vault_root, config, changed_files, config_path)?;
     report::write_report(vault_root, &config.report_path, &outcome.report_markdown)
         .map_err(|e| format!("cannot write report {}: {e}", config.report_path))?;
+    // Write continuity report if available
+    if let Some(ref continuity_md) = outcome.continuity_report_markdown {
+        report::write_report(vault_root, &config.continuity_report_path, continuity_md)
+            .map_err(|e| format!("cannot write continuity report {}: {e}", config.continuity_report_path))?;
+    }
     Ok(outcome)
 }

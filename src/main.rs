@@ -71,6 +71,21 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Deterministic frontmatter migration (separate from validation).
+    MigrateFrontmatter {
+        /// Vault root directory.
+        #[arg(long, default_value = ".")]
+        vault: PathBuf,
+        /// Optional YAML config override.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Show what would change without modifying files.
+        #[arg(long)]
+        plan: bool,
+        /// Apply the migration (mutates canonical records).
+        #[arg(long)]
+        r#apply: bool,
+    },
 }
 
 fn json_escape(s: &str) -> String {
@@ -258,6 +273,54 @@ fn main() -> ExitCode {
                 chadlands_validator::boundary::resolve(&index, &cfg, &manifests);
             println!("{}", boundary_json(&boundary));
             ExitCode::SUCCESS
+        }
+        Commands::MigrateFrontmatter {
+            vault,
+            config,
+            plan: _plan,
+            apply: apply_flag,
+        } => {
+            let cfg = match Config::resolve(config.as_deref(), &vault) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("config error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let index = match chadlands_validator::vault::scan(&vault, &cfg) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("scan error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+
+            if apply_flag {
+                // Apply mode: execute the migration
+                match chadlands_validator::migration::apply(&index, &cfg, &vault) {
+                    Ok(changed) => {
+                        if changed.is_empty() {
+                            println!("migration applied: no files changed");
+                        } else {
+                            println!("migration applied: {} file(s) changed", changed.len());
+                            for f in &changed {
+                                println!("  {f}");
+                            }
+                        }
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("migration error: {e}");
+                        ExitCode::from(2)
+                    }
+                }
+            } else {
+                // Plan mode (default): show what would change
+                let migration_plan = chadlands_validator::migration::plan(&index, &cfg, &vault);
+                let plan_md = chadlands_validator::migration::render_plan(&migration_plan);
+                println!("{plan_md}");
+                ExitCode::SUCCESS
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ use crate::boundary::StateBoundary;
 use crate::config::Config;
 use crate::findings::{Finding, Severity};
 use crate::manifest::Manifest;
+use crate::source_index::SourceIndex;
 use crate::vault::VaultIndex;
 
 pub struct RuleContext<'a> {
@@ -20,6 +21,7 @@ pub struct RuleContext<'a> {
     pub config: &'a Config,
     pub boundary: &'a StateBoundary,
     pub manifests: &'a [Manifest],
+    pub source_index: Option<&'a SourceIndex>,
 }
 
 impl<'a> RuleContext<'a> {
@@ -48,5 +50,10 @@ pub fn run_all(ctx: &RuleContext) -> Vec<Finding> {
     out.extend(cursor::check(ctx));
     out.extend(identity::check(ctx));
     out.extend(hygiene::check(ctx));
+    // New technology/continuity rules
+    out.extend(crate::technology::check(ctx));
+    out.extend(crate::receipts::check(ctx, ctx.source_index));
+    out.extend(crate::capability::check(ctx, ctx.source_index));
+    out.extend(crate::coverage::check(ctx, ctx.source_index));
     out
 }

@@ -267,6 +267,180 @@ static RULES: &[RuleMeta] = &[
         "Revert the change to the collector-owned path. Chadlands workflows may not write to 70 Sources/ evidence trees.",
         90
     ),
+    // --- 11: technology structural ---
+    rule!(
+        "CHAD-TECH-001",
+        "accepted/executing road lacks stable road_id",
+        "Add `road_id` to the frontmatter of the accepted/executing technology road.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-002",
+        "duplicate road_id",
+        "Ensure each road_id is unique across the vault. Remove the duplicate from one record.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-003",
+        "accepted road lacks acceptance evidence",
+        "Add `accepted_year` or `acceptance_cursor` to the road's frontmatter.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-004",
+        "executing road missing due boundary",
+        "Add `terminal_due_year` to the road's frontmatter.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-005",
+        "terminal road has no result/receipt mapping",
+        "Add `result` or `terminal_result` to the frontmatter of the completed road.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-006",
+        "produces references missing capability record",
+        "Create the durable capability record or correct the `produces` reference.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-007",
+        "road/capability relationship disagreement",
+        "Reconcile the explicit machine-readable relationship between road and capability records.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-008",
+        "portfolio references unresolved child road",
+        "Create the road record or remove the road_id from the portfolio's `road_ids`.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-009",
+        "requires/cheapened_by/produces references unresolved capability",
+        "Create the capability record or correct the reference.",
+        62
+    ),
+    rule!(
+        "CHAD-TECH-010",
+        "attained capability missing required fields",
+        "Add the missing `depth`, `custody`, or `owner` field to the capability's frontmatter.",
+        63
+    ),
+    // --- 12: receipt monitoring ---
+    rule!(
+        "CHAD-RECEIPT-001",
+        "accepted road has no start evidence",
+        "Add start evidence via a structured receipt or canonical `started_year`/`started_cursor` field.",
+        64
+    ),
+    rule!(
+        "CHAD-RECEIPT-002",
+        "executing road has no progress receipt",
+        "Add a structured [CL PROGRESS ...] receipt or advance the road's canonical progress fields.",
+        64
+    ),
+    rule!(
+        "CHAD-RECEIPT-003",
+        "expected receipt boundary arriving",
+        "The terminal_due_year is the current year. Prepare the terminal receipt.",
+        64
+    ),
+    rule!(
+        "CHAD-RECEIPT-004",
+        "promised receipt boundary passed without receipt",
+        "Provide the overdue terminal receipt or update the road's due boundary.",
+        64
+    ),
+    rule!(
+        "CHAD-RECEIPT-005",
+        "terminal result conflicts with unresolved PARTIAL",
+        "Resolve, supersede, or cancel the unresolved PARTIAL components before claiming terminal success.",
+        64
+    ),
+    rule!(
+        "CHAD-RECEIPT-006",
+        "complete portfolio return omits active child road",
+        "Include the active child road in the return or close/mark it inactive.",
+        64
+    ),
+    // --- 13: capability exploitation ---
+    rule!(
+        "CHAD-CAP-001",
+        "attained capability exceeds evidenced-use dormancy threshold",
+        "No qualifying use is evidenced in the indexed direct/canonical machine-readable evidence. Review capability relevance.",
+        65
+    ),
+    // --- 14: coverage candidates ---
+    rule!(
+        "CHAD-COVER-001",
+        "structured receipt references missing canonical owner",
+        "Create the canonical record for the referenced stable ID or correct the receipt.",
+        66
+    ),
+    rule!(
+        "CHAD-COVER-002",
+        "unresolved candidate repeats across messages",
+        "Consider creating a canonical record for this repeatedly-mentioned entity.",
+        67
+    ),
+    rule!(
+        "CHAD-COVER-003",
+        "lifecycle-shaped candidate persists without materialization",
+        "This candidate appears to be a durable object. Create a canonical record or confirm it is transient.",
+        67
+    ),
+    rule!(
+        "CHAD-COVER-004",
+        "single weak proper-name candidate",
+        "Low priority. Monitor for repeated appearances.",
+        68
+    ),
+    // --- 15: legacy technology migration ---
+    rule!(
+        "TECH-MIG-001",
+        "legacy technology-node requires semantic classification",
+        "Add road_id, capability_id, or portfolio_id to classify the legacy record.",
+        69
+    ),
+    rule!(
+        "TECH-MIG-002",
+        "technology summary row lacks resolvable owner",
+        "Create or link a durable technology record that owns this summary entry.",
+        69
+    ),
+    rule!(
+        "TECH-MIG-003",
+        "portfolio does not declare resolvable child road_ids",
+        "Add `road_ids` to the portfolio frontmatter listing its child roads.",
+        69
+    ),
+    rule!(
+        "TECH-MIG-004",
+        "active legacy technology-bearing portfolio lacks machine-readable child-road representation",
+        "Create durable technology-road records to enable road-level validation.",
+        69
+    ),
+    rule!(
+        "TECH-MIG-005",
+        "technology road declared by authoritative surface has no machine-readable road owner",
+        "Create a technology-road record with the appropriate road_id.",
+        69
+    ),
+    rule!(
+        "TECH-MIG-006",
+        "technology receipt/lifecycle monitoring coverage incomplete",
+        "Active technology remains behind legacy representation. Create road/capability records.",
+        69
+    ),
+    // --- 16: capability migration ---
+    rule!(
+        "CAP-MIG-001",
+        "canonical capability register lacks machine-readable durable capability owners",
+        "Create capability records with `type: capability` and `capability_id` to enable exploitation tracking.",
+        69
+    ),
 ];
 
 /// HashMap for O(1) lookup by rule ID.
@@ -336,6 +510,34 @@ mod tests {
             "CHAD-LINK-001",
             "CHAD-REF-001",
             "CHAD-PROT-001",
+            "CHAD-TECH-001",
+            "CHAD-TECH-002",
+            "CHAD-TECH-003",
+            "CHAD-TECH-004",
+            "CHAD-TECH-005",
+            "CHAD-TECH-006",
+            "CHAD-TECH-007",
+            "CHAD-TECH-008",
+            "CHAD-TECH-009",
+            "CHAD-TECH-010",
+            "CHAD-RECEIPT-001",
+            "CHAD-RECEIPT-002",
+            "CHAD-RECEIPT-003",
+            "CHAD-RECEIPT-004",
+            "CHAD-RECEIPT-005",
+            "CHAD-RECEIPT-006",
+            "CHAD-CAP-001",
+            "CHAD-COVER-001",
+            "CHAD-COVER-002",
+            "CHAD-COVER-003",
+            "CHAD-COVER-004",
+            "TECH-MIG-001",
+            "TECH-MIG-002",
+            "TECH-MIG-003",
+            "TECH-MIG-004",
+            "TECH-MIG-005",
+            "TECH-MIG-006",
+            "CAP-MIG-001",
         ];
         for rule_id in used_rules {
             let m = lookup(rule_id);

@@ -43,20 +43,43 @@ pub fn check(ctx: &RuleContext) -> Vec<Finding> {
         }
 
         // CHAD-CURSOR-002: future cursors.
+        // Distinguish between:
+        // - cursor > State Boundary but <= max direct-source cursor (stale boundary)
+        // - cursor > max direct-source cursor (genuinely unsupported)
         if let Some(frontier) = boundary.current_source_cursor {
             for (field, value) in [("source_cursor", source), ("reviewed_through_cursor", reviewed)]
             {
                 if let Some(v) = value {
                     if v > frontier {
+                        // Check if the cursor is within the indexed direct-source range
+                        let max_source = ctx
+                            .source_index
+                            .and_then(|si| si.max_source_cursor);
+                        let in_source_range = max_source.map(|m| v <= m).unwrap_or(false);
+
+                        let message = if in_source_range {
+                            format!(
+                                "`{field}: {v}` exceeds the authoritative \
+                                 State Boundary current_source_cursor {frontier} \
+                                 but is within the indexed direct-source frontier \
+                                 ({max_source:?}). The State Boundary may be stale. \
+                                 Determine whether the boundary needs updating before \
+                                 altering the record."
+                            )
+                        } else {
+                            format!(
+                                "`{field}: {v}` exceeds both the authoritative \
+                                 State Boundary current_source_cursor {frontier} \
+                                 and the maximum indexed direct-source cursor \
+                                 ({max_source:?}). Correct the cursor to not \
+                                 exceed the actual evidence frontier."
+                            )
+                        };
                         out.push(finding(
                             "CHAD-CURSOR-002",
                             ctx.sev("CHAD-CURSOR-002", Severity::Error),
                             Some(&note.path),
-                            format!(
-                                "`{field}: {v}` exceeds the vault's \
-                                 current_source_cursor {frontier}. Correct the \
-                                 cursor to not exceed the actual evidence frontier."
-                            ),
+                            message,
                         ));
                     }
                 }
