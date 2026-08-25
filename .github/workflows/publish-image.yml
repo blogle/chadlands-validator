@@ -2,7 +2,7 @@ name: Publish OCI Image
 
 on:
   push:
-    branches: [main]
+    branches: [master]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -50,7 +50,7 @@ jobs:
           short_sha="$(printf '%s' "$GITHUB_SHA" | cut -c1-12)"
           tags=("sha-${short_sha}")
 
-          if [[ "$GITHUB_REF" == "refs/heads/main" ]]; then
+          if [[ "$GITHUB_REF" == "refs/heads/master" ]]; then
             tags+=("latest")
           fi
 
