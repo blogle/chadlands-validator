@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum, ArgGroup};
 
 use chadlands_validator::boundary::StateBoundary;
 use chadlands_validator::config::Config;
@@ -72,6 +72,7 @@ enum Commands {
         config: Option<PathBuf>,
     },
     /// Deterministic frontmatter migration (separate from validation).
+    #[command(group(ArgGroup::new("migration_mode").args(["plan", "apply"]).multiple(false)))]
     MigrateFrontmatter {
         /// Vault root directory.
         #[arg(long, default_value = ".")]

@@ -597,18 +597,10 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
 
 /// Extract declared road names from a legacy portfolio's body text.
 fn extract_road_names(body: &str) -> Vec<String> {
-    let known_roads = [
-        "Steam",
-        "Cold-Hardy Grain",
-        "Sampling & Error Bands",
-        "Irrigation",
-        "Managed Woodland",
-        "Warehouse Receipts",
-    ];
     let body_lower = body.to_ascii_lowercase().replace('&', "and");
     let mut found = Vec::new();
     let mut seen = HashSet::new();
-    for road in &known_roads {
+    for road in crate::KNOWN_ROADS {
         let lower = road.to_ascii_lowercase().replace('&', "and");
         if body_lower.contains(&lower) && seen.insert(lower) {
             found.push(road.to_string());
@@ -691,19 +683,4 @@ fn check_capability_migration(ctx: &RuleContext, out: &mut Vec<Finding>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::frontmatter::parse;
-    use crate::vault::Note;
-
-    fn test_note(path: &str, fm_text: &str, body: &str) -> Note {
-        let fm = parse(&format!("---\n{fm_text}\n---\n{body}"));
-        Note {
-            path: path.into(),
-            frontmatter: fm.value,
-            body: fm.body,
-            content_hash: 0,
-            parse_error: None,
-            has_frontmatter: true,
-            curated: true,
-        }
-    }
 }

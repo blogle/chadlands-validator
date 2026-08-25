@@ -437,13 +437,15 @@ pub fn render_plan(plan: &MigrationPlan) -> String {
     out.push_str("| File | Rule | Field | Action |\n");
     out.push_str("|---|---|---|---|\n");
 
+    let mut transform_count = 0;
     for file in &plan.files {
         if file.skipped || file.changes.is_empty() {
             continue;
         }
         for change in &file.changes {
             let action = if change.new_value.is_some() {
-                "transform"
+                transform_count += 1;
+                "transform (plan-only)"
             } else {
                 "remove"
             };
@@ -452,6 +454,13 @@ pub fn render_plan(plan: &MigrationPlan) -> String {
                 file.path, change.rule_id, change.field, action,
             ));
         }
+    }
+
+    if transform_count > 0 {
+        out.push_str(&format!(
+            "\n> **Note:** {} transform(s) are plan-only. Transform application is not yet implemented; only removals are executed by `--apply`.\n",
+            transform_count
+        ));
     }
 
     // Skipped files

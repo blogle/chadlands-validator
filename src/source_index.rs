@@ -774,18 +774,11 @@ pub fn seed_canonical_materiality(
 /// Count declared child roads from a legacy portfolio's body text.
 /// Uses the same known-road list as technology.rs extract_road_names.
 fn count_declared_roads(body: &str) -> usize {
-    let known_roads = [
-        "steam",
-        "cold-hardy grain",
-        "sampling",
-        "irrigation",
-        "woodland",
-        "warehouse",
-    ];
     let body_lower = body.to_ascii_lowercase();
     let mut count = 0usize;
-    for road in &known_roads {
-        if body_lower.contains(road) {
+    for road in crate::KNOWN_ROADS {
+        let lower = road.to_ascii_lowercase().replace('&', "and");
+        if body_lower.contains(&lower) {
             count += 1;
         }
     }
@@ -1227,7 +1220,7 @@ pub fn build(
             match std::fs::read_to_string(abs) {
                 Ok(raw) => {
                     source_files_scanned += 1;
-                    let parsed = parse(&rel);
+                    let parsed = parse(&raw);
                     // Use the body (after frontmatter) for message parsing
                     let body = if parsed.has_block { &parsed.body } else { &raw };
                     let file_messages = parse_messages(&rel, body, config);

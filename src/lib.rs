@@ -29,6 +29,17 @@ use findings::{Findings, Severity};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Canonical road names in the Chadlands portfolio.
+/// Used by source_index and technology modules for consistent road counting.
+pub const KNOWN_ROADS: &[&str] = &[
+    "Steam",
+    "Cold-Hardy Grain",
+    "Sampling & Error Bands",
+    "Irrigation",
+    "Managed Woodland",
+    "Warehouse Receipts",
+];
+
 pub struct ValidationOutcome {
     pub boundary: boundary::StateBoundary,
     pub findings: Findings,
