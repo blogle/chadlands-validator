@@ -457,9 +457,10 @@ fn check_refs(ctx: &RuleContext, out: &mut Vec<Finding>) {
             let tokens: Vec<&str> = v.split_whitespace().collect();
             let name_shaped = !tokens.is_empty()
                 && tokens.len() <= 3
-                && tokens
-                    .iter()
-                    .all(|t| t.chars().all(|c| c.is_alphabetic() || c == '-' || c == '\''));
+                && tokens.iter().all(|t| {
+                    t.chars()
+                        .all(|c| c.is_alphabetic() || c == '-' || c == '\'')
+                });
             if !name_shaped {
                 continue;
             }

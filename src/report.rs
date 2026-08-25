@@ -209,9 +209,56 @@ fn fm_list(key: &str, values: &[String]) -> String {
 /// Previous report frontmatter, parsed minimally for change detection.
 pub struct PreviousReport {
     pub validated_revision: Option<String>,
+    pub validator_build_revision: Option<String>,
+    pub config_fingerprint: Option<String>,
     pub error_rules: BTreeMap<String, usize>,
     pub warn_rules: BTreeMap<String, usize>,
     pub info_rules: BTreeMap<String, usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeltaBasis {
+    NoPreviousReport,
+    NotComparable,
+    Comparable {
+        vault_changed: bool,
+    },
+    BasisChanged {
+        vault_changed: bool,
+        validator_changed: bool,
+        config_changed: bool,
+    },
+}
+
+fn classify_delta_basis(
+    previous: Option<&PreviousReport>,
+    vault_revision: &str,
+    validator_revision: &str,
+    config_fingerprint: &str,
+) -> DeltaBasis {
+    let Some(previous) = previous else {
+        return DeltaBasis::NoPreviousReport;
+    };
+    let (Some(previous_vault), Some(previous_validator), Some(previous_config)) = (
+        previous.validated_revision.as_deref(),
+        previous.validator_build_revision.as_deref(),
+        previous.config_fingerprint.as_deref(),
+    ) else {
+        return DeltaBasis::NotComparable;
+    };
+
+    let vault_changed = previous_vault != vault_revision;
+    let validator_changed = previous_validator != validator_revision;
+    let config_changed = previous_config != config_fingerprint;
+    if validator_changed || config_changed {
+        DeltaBasis::BasisChanged {
+            vault_changed,
+            validator_changed,
+            config_changed,
+        }
+    } else {
+        DeltaBasis::Comparable { vault_changed }
+    }
 }
 
 impl PreviousReport {
@@ -227,7 +274,9 @@ impl PreviousReport {
         let after_first = &raw[first_fence + 3..];
         // Skip optional trailing newline after the first fence.
         let after_first = after_first.strip_prefix('\n').unwrap_or(after_first);
-        let second_fence_rel = after_first.find("\n---").or_else(|| after_first.find("\r\n---"))?;
+        let second_fence_rel = after_first
+            .find("\n---")
+            .or_else(|| after_first.find("\r\n---"))?;
         let fm_text = &after_first[..second_fence_rel];
 
         let validated_revision = fm_text
@@ -235,6 +284,26 @@ impl PreviousReport {
             .find(|l| l.starts_with("validated_revision:"))
             .map(|l| {
                 l.trim_start_matches("validated_revision:")
+                    .trim()
+                    .trim_matches('"')
+                    .to_string()
+            });
+
+        let validator_build_revision = fm_text
+            .lines()
+            .find(|l| l.starts_with("validator_build_revision:"))
+            .map(|l| {
+                l.trim_start_matches("validator_build_revision:")
+                    .trim()
+                    .trim_matches('"')
+                    .to_string()
+            });
+
+        let config_fingerprint = fm_text
+            .lines()
+            .find(|l| l.starts_with("config_fingerprint:"))
+            .map(|l| {
+                l.trim_start_matches("config_fingerprint:")
                     .trim()
                     .trim_matches('"')
                     .to_string()
@@ -284,6 +353,8 @@ impl PreviousReport {
 
         Some(PreviousReport {
             validated_revision,
+            validator_build_revision,
+            config_fingerprint,
             error_rules,
             warn_rules,
             info_rules,
@@ -302,12 +373,33 @@ pub fn render(
     let generated_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "unknown".to_string());
-    let status = if findings.errors() > 0 { "failed" } else { "passed" };
+    let status = if findings.errors() > 0 {
+        "failed"
+    } else {
+        "passed"
+    };
 
     // Change detection.
     let previous_revision = previous
         .and_then(|p| p.validated_revision.as_deref())
         .unwrap_or("none");
+    let previous_validator_build = previous
+        .and_then(|p| p.validator_build_revision.as_deref())
+        .unwrap_or("none");
+    let previous_config_fp = previous
+        .and_then(|p| p.config_fingerprint.as_deref())
+        .unwrap_or("none");
+
+    let current_build_revision = crate::BUILD_REVISION;
+    let current_config_fp = config.fingerprint();
+
+    let delta_basis = classify_delta_basis(
+        previous,
+        &boundary.vault_revision,
+        current_build_revision,
+        &current_config_fp,
+    );
+
     let (new_errors, resolved_errors, new_warnings, resolved_warnings, new_infos, resolved_infos) =
         if let Some(prev) = previous {
             let current_errors = rule_counts(findings, Severity::Error);
@@ -329,6 +421,14 @@ pub fn render(
         "validator_version: {}\n",
         yaml_escape(crate::VERSION)
     ));
+    out.push_str(&format!(
+        "validator_build_revision: {}\n",
+        yaml_escape(current_build_revision)
+    ));
+    out.push_str(&format!(
+        "config_fingerprint: {}\n",
+        yaml_escape(&current_config_fp)
+    ));
     out.push_str(&format!("generated_at: {}\n", yaml_escape(&generated_at)));
     out.push_str(&format!("validated_at: {}\n", yaml_escape(&generated_at)));
     out.push_str(&format!(
@@ -338,6 +438,14 @@ pub fn render(
     out.push_str(&format!(
         "previous_revision: {}\n",
         yaml_escape(previous_revision)
+    ));
+    out.push_str(&format!(
+        "previous_validator_build: {}\n",
+        yaml_escape(previous_validator_build)
+    ));
+    out.push_str(&format!(
+        "previous_config_fingerprint: {}\n",
+        yaml_escape(previous_config_fp)
     ));
     if let Some(p) = config_path {
         out.push_str(&format!("validator_config_path: {}\n", yaml_escape(p)));
@@ -359,25 +467,32 @@ pub fn render(
     out.push_str(&format!("errors: {}\n", findings.errors()));
     out.push_str(&format!("warnings: {}\n", findings.warnings()));
     out.push_str(&format!("infos: {}\n", findings.infos()));
-    out.push_str(&format!("new_errors: {new_errors}\n"));
-    out.push_str(&format!("resolved_errors: {resolved_errors}\n"));
-    out.push_str(&format!("new_warnings: {new_warnings}\n"));
-    out.push_str(&format!("resolved_warnings: {resolved_warnings}\n"));
-    out.push_str(&format!("new_infos: {new_infos}\n"));
-    out.push_str(&format!("resolved_infos: {resolved_infos}\n"));
+    let delta_status = match delta_basis {
+        DeltaBasis::NoPreviousReport => "no-previous-report",
+        DeltaBasis::NotComparable => "not-comparable",
+        DeltaBasis::Comparable { .. } => "comparable",
+        DeltaBasis::BasisChanged { .. } => "basis-changed",
+    };
+    out.push_str(&format!("delta_status: {delta_status}\n"));
+    if matches!(delta_basis, DeltaBasis::Comparable { .. }) {
+        out.push_str(&format!("new_errors: {new_errors}\n"));
+        out.push_str(&format!("resolved_errors: {resolved_errors}\n"));
+        out.push_str(&format!("new_warnings: {new_warnings}\n"));
+        out.push_str(&format!("resolved_warnings: {resolved_warnings}\n"));
+        out.push_str(&format!("new_infos: {new_infos}\n"));
+        out.push_str(&format!("resolved_infos: {resolved_infos}\n"));
+    } else {
+        out.push_str("new_errors: null\nresolved_errors: null\n");
+        out.push_str("new_warnings: null\nresolved_warnings: null\n");
+        out.push_str("new_infos: null\nresolved_infos: null\n");
+    }
     out.push('\n');
 
     // Relevant config values the LLM needs.
     out.push_str("# --- effective validator config ---\n");
     out.push_str(&fm_str("chronicle_dir", &config.chronicle_dir));
-    out.push_str(&fm_list(
-        "protected_prefixes",
-        &config.protected_prefixes,
-    ));
-    out.push_str(&fm_list(
-        "unresolved_values",
-        &config.unresolved_values,
-    ));
+    out.push_str(&fm_list("protected_prefixes", &config.protected_prefixes));
+    out.push_str(&fm_list("unresolved_values", &config.unresolved_values));
     out.push_str(&fm_list("id_fields", &config.id_fields));
     out.push_str("required_fields:\n");
     let mut rf_keys: Vec<&String> = config.required_fields.keys().collect();
@@ -422,13 +537,40 @@ pub fn render(
         files_checked,
         boundary.vault_revision
     ));
-    if previous_revision != "none" {
-        out.push_str(&format!(
-            "> Previous revision: `{previous_revision}`. Delta: \
-             {new_errors} new / {resolved_errors} resolved errors, \
-             {new_warnings} new / {resolved_warnings} resolved warnings, \
-             {new_infos} new / {resolved_infos} resolved infos.\n\n"
-        ));
+    match delta_basis {
+        DeltaBasis::NoPreviousReport => {
+            out.push_str("> Delta: no previous report is available; no comparison was made.\n\n");
+        }
+        DeltaBasis::NotComparable => {
+            out.push_str(
+                "> Delta: **NOT COMPARABLE**. The previous report lacks complete vault, validator-build, or effective-config provenance; finding-count changes are not evidence of vault repair.\n\n",
+            );
+        }
+        DeltaBasis::Comparable { vault_changed } => {
+            out.push_str(&format!(
+                "> Previous revision: `{previous_revision}`. Vault revision: {}. Delta: \
+                 {new_errors} new / {resolved_errors} resolved errors, \
+                 {new_warnings} new / {resolved_warnings} resolved warnings, \
+                 {new_infos} new / {resolved_infos} resolved infos.\n\n",
+                if vault_changed {
+                    "changed"
+                } else {
+                    "unchanged"
+                }
+            ));
+        }
+        DeltaBasis::BasisChanged {
+            vault_changed,
+            validator_changed,
+            config_changed,
+        } => {
+            out.push_str(&format!(
+                "> Delta basis changed:\n> - vault revision: {}\n> - validator revision: {}\n> - config fingerprint: {}\n>\n> Finding-count changes ({new_errors}/{resolved_errors} errors, {new_warnings}/{resolved_warnings} warnings, {new_infos}/{resolved_infos} infos increased/decreased) may reflect validator/config changes rather than vault repair.\n\n",
+                if vault_changed { "changed" } else { "unchanged" },
+                if validator_changed { "changed" } else { "unchanged" },
+                if config_changed { "changed" } else { "unchanged" },
+            ));
+        }
     }
     out.push_str(
         "> This report is non-authoritative and valid only for `validated_revision`. \
@@ -483,14 +625,14 @@ fn rule_counts(findings: &Findings, severity: Severity) -> BTreeMap<String, usiz
     m
 }
 
-fn delta(
-    prev: &BTreeMap<String, usize>,
-    current: &BTreeMap<String, usize>,
-) -> (usize, usize) {
+fn delta(prev: &BTreeMap<String, usize>, current: &BTreeMap<String, usize>) -> (usize, usize) {
     let mut new = 0usize;
     let mut resolved = 0usize;
-    let all_rules: std::collections::HashSet<&str> =
-        prev.keys().chain(current.keys()).map(|s| s.as_str()).collect();
+    let all_rules: std::collections::HashSet<&str> = prev
+        .keys()
+        .chain(current.keys())
+        .map(|s| s.as_str())
+        .collect();
     for rule in all_rules {
         let p = prev.get(rule).copied().unwrap_or(0);
         let c = current.get(rule).copied().unwrap_or(0);
@@ -523,6 +665,21 @@ pub fn write_report(vault_root: &Path, report_path: &str, content: &str) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn previous(
+        vault: Option<&str>,
+        validator: Option<&str>,
+        config: Option<&str>,
+    ) -> PreviousReport {
+        PreviousReport {
+            validated_revision: vault.map(str::to_string),
+            validator_build_revision: validator.map(str::to_string),
+            config_fingerprint: config.map(str::to_string),
+            error_rules: BTreeMap::new(),
+            warn_rules: BTreeMap::new(),
+            info_rules: BTreeMap::new(),
+        }
+    }
 
     #[test]
     fn yaml_escape_numeric_strings() {
@@ -566,5 +723,51 @@ mod tests {
         assert!(!looks_like_number("0x")); // no digits after prefix
         assert!(!looks_like_number("0o")); // no digits after prefix
         assert!(!looks_like_number("0b")); // no digits after prefix
+    }
+
+    #[test]
+    fn delta_basis_allows_vault_only_comparison() {
+        let prior = previous(Some("vault-a"), Some("validator"), Some("config"));
+        assert_eq!(
+            classify_delta_basis(Some(&prior), "vault-b", "validator", "config"),
+            DeltaBasis::Comparable {
+                vault_changed: true
+            }
+        );
+    }
+
+    #[test]
+    fn delta_basis_identifies_validator_only_change() {
+        let prior = previous(Some("vault"), Some("validator-a"), Some("config"));
+        assert_eq!(
+            classify_delta_basis(Some(&prior), "vault", "validator-b", "config"),
+            DeltaBasis::BasisChanged {
+                vault_changed: false,
+                validator_changed: true,
+                config_changed: false,
+            }
+        );
+    }
+
+    #[test]
+    fn delta_basis_identifies_config_only_change() {
+        let prior = previous(Some("vault"), Some("validator"), Some("config-a"));
+        assert_eq!(
+            classify_delta_basis(Some(&prior), "vault", "validator", "config-b"),
+            DeltaBasis::BasisChanged {
+                vault_changed: false,
+                validator_changed: false,
+                config_changed: true,
+            }
+        );
+    }
+
+    #[test]
+    fn delta_basis_rejects_old_report_without_fingerprints() {
+        let prior = previous(Some("vault"), None, None);
+        assert_eq!(
+            classify_delta_basis(Some(&prior), "vault", "validator", "config"),
+            DeltaBasis::NotComparable
+        );
     }
 }

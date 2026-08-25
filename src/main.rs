@@ -11,7 +11,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand, ValueEnum, ArgGroup};
+use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 use chadlands_validator::boundary::StateBoundary;
 use chadlands_validator::config::Config;
@@ -122,7 +122,10 @@ fn boundary_json(b: &StateBoundary) -> String {
         opt("current_year", b.current_year),
         opt("last_resolved_year", b.last_resolved_year),
         opt("current_source_cursor", b.current_source_cursor),
-        opt("canonical_materialized_cursor", b.canonical_materialized_cursor),
+        opt(
+            "canonical_materialized_cursor",
+            b.canonical_materialized_cursor
+        ),
         json_escape(&b.vault_revision),
         json_escape(&source),
     )
@@ -152,10 +155,7 @@ fn findings_json(findings: &Findings) -> String {
 }
 
 fn print_text(findings: &Findings, files_checked: usize, revision: &str) {
-    println!(
-        "validated {} files at revision {}",
-        files_checked, revision
-    );
+    println!("validated {} files at revision {}", files_checked, revision);
     println!(
         "{} errors, {} warnings, {} infos",
         findings.errors(),
@@ -270,8 +270,7 @@ fn main() -> ExitCode {
                 }
             };
             let manifests = chadlands_validator::manifest::collect(&index);
-            let (boundary, _) =
-                chadlands_validator::boundary::resolve(&index, &cfg, &manifests);
+            let (boundary, _) = chadlands_validator::boundary::resolve(&index, &cfg, &manifests);
             println!("{}", boundary_json(&boundary));
             ExitCode::SUCCESS
         }

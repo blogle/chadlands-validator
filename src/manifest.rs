@@ -22,8 +22,8 @@ use std::collections::HashSet;
 
 use yaml_rust2::Yaml;
 
-use crate::findings::{Finding, Severity};
 use crate::config::Config;
+use crate::findings::{Finding, Severity};
 use crate::rules::finding;
 use crate::vault::{Note, VaultIndex};
 
@@ -197,8 +197,7 @@ pub fn check_manifests(
                     "CHAD-CURSOR-006",
                     config.severity_for("CHAD-CURSOR-006", Severity::Error),
                     Some(&m.path),
-                    "manifest subject is missing its `path`. Add a `path` field."
-                        .to_string(),
+                    "manifest subject is missing its `path`. Add a `path` field.".to_string(),
                 ));
             }
         }

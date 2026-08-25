@@ -327,11 +327,12 @@ pub fn find_mentions(
     for id in identities {
         for alias in &id.aliases {
             let norm = normalize_text(alias);
-            if !config.ignored_aliases.iter().any(|a| a.eq_ignore_ascii_case(&norm)) {
-                alias_to_keys
-                    .entry(norm)
-                    .or_default()
-                    .push(id.key.clone());
+            if !config
+                .ignored_aliases
+                .iter()
+                .any(|a| a.eq_ignore_ascii_case(&norm))
+            {
+                alias_to_keys.entry(norm).or_default().push(id.key.clone());
             }
         }
     }
@@ -380,40 +381,40 @@ pub fn find_mentions(
 
         // 1. Exact stable ID match
         for (id, key) in &id_to_key {
-            if body_norm.contains(id.as_str()) {
-                if matched_keys.insert(key.clone()) {
-                    mentions.push(Mention {
-                        identity_key: key.clone(),
-                        cursor: msg.cursor,
-                        message_index: msg_idx,
-                    });
-                }
+            if body_norm.contains(id.as_str()) && matched_keys.insert(key.clone()) {
+                mentions.push(Mention {
+                    identity_key: key.clone(),
+                    cursor: msg.cursor,
+                    message_index: msg_idx,
+                });
             }
         }
 
         // 2. Exact canonical title match
         for (title_norm, key) in &title_to_key {
-            if title_norm.len() >= 3 && body_norm.contains(title_norm.as_str()) {
-                if matched_keys.insert(key.clone()) {
-                    mentions.push(Mention {
-                        identity_key: key.clone(),
-                        cursor: msg.cursor,
-                        message_index: msg_idx,
-                    });
-                }
+            if title_norm.len() >= 3
+                && body_norm.contains(title_norm.as_str())
+                && matched_keys.insert(key.clone())
+            {
+                mentions.push(Mention {
+                    identity_key: key.clone(),
+                    cursor: msg.cursor,
+                    message_index: msg_idx,
+                });
             }
         }
 
         // 3. Exact alias match (non-ambiguous only)
         for (alias_norm, key) in &alias_to_key {
-            if alias_norm.len() >= 3 && body_norm.contains(alias_norm.as_str()) {
-                if matched_keys.insert(key.clone()) {
-                    mentions.push(Mention {
-                        identity_key: key.clone(),
-                        cursor: msg.cursor,
-                        message_index: msg_idx,
-                    });
-                }
+            if alias_norm.len() >= 3
+                && body_norm.contains(alias_norm.as_str())
+                && matched_keys.insert(key.clone())
+            {
+                mentions.push(Mention {
+                    identity_key: key.clone(),
+                    cursor: msg.cursor,
+                    message_index: msg_idx,
+                });
             }
         }
     }
@@ -522,7 +523,10 @@ pub fn normalize_for_lookup(s: &str) -> String {
 /// 1. Explicit structured receipt containing turn/year
 /// 2. Runtime records with cursor/range and turn/year
 /// 3. Other configured boundary records
-pub fn build_cursor_epochs(index: &VaultIndex, boundary: &crate::boundary::StateBoundary) -> Vec<CursorEpoch> {
+pub fn build_cursor_epochs(
+    index: &VaultIndex,
+    boundary: &crate::boundary::StateBoundary,
+) -> Vec<CursorEpoch> {
     let mut epochs = Vec::new();
 
     // From boundary: if we have current_source_cursor and current_turn/year,
@@ -697,9 +701,7 @@ pub fn aggregate_activity(
                 act.last_mentioned_message_index = Some(m.message_index);
             }
         }
-        let seen = seen_per_identity
-            .entry(m.identity_key.clone())
-            .or_default();
+        let seen = seen_per_identity.entry(m.identity_key.clone()).or_default();
         seen.insert(m.message_index);
     }
     // Count distinct messages
@@ -771,18 +773,9 @@ pub fn seed_canonical_materiality(
     }
 }
 
-/// Count declared child roads from a legacy portfolio's body text.
-/// Uses the same known-road list as technology.rs extract_road_names.
+/// Count declared child roads through the bounded legacy adapter.
 fn count_declared_roads(body: &str) -> usize {
-    let body_lower = body.to_ascii_lowercase();
-    let mut count = 0usize;
-    for road in crate::KNOWN_ROADS {
-        let lower = road.to_ascii_lowercase().replace('&', "and");
-        if body_lower.contains(&lower) {
-            count += 1;
-        }
-    }
-    count
+    crate::legacy_technology::extract_roads(body, &[]).len()
 }
 
 // ---------------------------------------------------------------------------
@@ -831,14 +824,15 @@ pub fn extract_candidates(
             if is_stable_id_syntax(clean) {
                 let norm = normalize_text(clean);
                 if !known_normalized.contains(&norm) {
-                    let entry = candidates
-                        .entry(clean.to_string())
-                        .or_insert_with(|| CoverageCandidate {
-                            text: clean.to_string(),
-                            occurrences: 0,
-                            distinct_messages: 0,
-                            signal: "stable-id-syntax".to_string(),
-                        });
+                    let entry =
+                        candidates
+                            .entry(clean.to_string())
+                            .or_insert_with(|| CoverageCandidate {
+                                text: clean.to_string(),
+                                occurrences: 0,
+                                distinct_messages: 0,
+                                signal: "stable-id-syntax".to_string(),
+                            });
                     entry.occurrences += 1;
                     candidate_messages
                         .entry(clean.to_string())
@@ -856,7 +850,9 @@ pub fn extract_candidates(
             }
             // Check if this is a substring of any canonical identity
             // (e.g., "National Records" is a substring of "National Records and Custody")
-            let is_substring = known_normalized.iter().any(|k| k.len() > norm.len() && k.contains(&norm));
+            let is_substring = known_normalized
+                .iter()
+                .any(|k| k.len() > norm.len() && k.contains(&norm));
             if is_substring {
                 continue;
             }
@@ -900,12 +896,16 @@ pub fn extract_candidates(
         })
         .collect();
 
-    // Sort: stable-id first, then by occurrences desc
+    // Stable total ordering: signal, occurrences, distinct messages, text.
+    // The final textual tie-breaker prevents HashMap iteration order from
+    // changing bounded report queues across identical runs.
     result.sort_by(|a, b| {
         a.signal
             .cmp(&b.signal)
             .reverse()
             .then_with(|| b.occurrences.cmp(&a.occurrences))
+            .then_with(|| b.distinct_messages.cmp(&a.distinct_messages))
+            .then_with(|| a.text.cmp(&b.text))
     });
 
     result
@@ -929,20 +929,36 @@ fn is_all_caps_protocol(name: &str) -> bool {
     // If ALL words are fully uppercase and >= 3 chars, it's likely protocol prose
     let all_caps_count = words
         .iter()
-        .filter(|w| {
-            w.len() >= 3
-                && w.chars().all(|c| !c.is_alphabetic() || c.is_uppercase())
-        })
+        .filter(|w| w.len() >= 3 && w.chars().all(|c| !c.is_alphabetic() || c.is_uppercase()))
         .count();
     if all_caps_count == words.len() {
         return true;
     }
     // Check for common protocol/status words
     let protocol_words = [
-        "return", "complete", "owner", "status", "protocol", "section",
-        "audit", "sovereign", "missing", "holding", "produced", "today",
-        "unavailable", "nothing", "state", "still", "pending", "active",
-        "inactive", "resolved", "unresolved", "blocked", "external",
+        "return",
+        "complete",
+        "owner",
+        "status",
+        "protocol",
+        "section",
+        "audit",
+        "sovereign",
+        "missing",
+        "holding",
+        "produced",
+        "today",
+        "unavailable",
+        "nothing",
+        "state",
+        "still",
+        "pending",
+        "active",
+        "inactive",
+        "resolved",
+        "unresolved",
+        "blocked",
+        "external",
     ];
     let lower = name.to_ascii_lowercase();
     let word_set: HashSet<&str> = lower.split_whitespace().collect();
@@ -969,8 +985,8 @@ fn extract_proper_names(text: &str) -> Vec<String> {
             let mut name_parts = vec![w];
             let mut j = i + 1;
             while j < words.len() {
-                let nw = words[j]
-                    .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-');
+                let nw =
+                    words[j].trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-');
                 if nw.len() >= 2
                     && nw.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
                     && !is_stopword(nw)
@@ -1220,6 +1236,8 @@ pub fn build(
             match std::fs::read_to_string(abs) {
                 Ok(raw) => {
                     source_files_scanned += 1;
+                    // Parse the file contents, never the relative path: direct-source
+                    // frontmatter must be removed before message parsing.
                     let parsed = parse(&raw);
                     // Use the body (after frontmatter) for message parsing
                     let body = if parsed.has_block { &parsed.body } else { &raw };
@@ -1273,7 +1291,12 @@ pub fn build(
         .collect();
 
     // 8. Extract coverage candidates
-    let candidates = extract_candidates(&messages, &identities, config, &canonical_identity_normalized);
+    let candidates = extract_candidates(
+        &messages,
+        &identities,
+        config,
+        &canonical_identity_normalized,
+    );
 
     // 9. Count technology objects from vault index
     let mut portfolio_count = 0usize;
@@ -1320,7 +1343,11 @@ pub fn build(
             continue;
         }
         let status = note.status().unwrap_or_default();
-        if status == "completed" || status == "closed" || status == "superseded" || status == "failed" {
+        if status == "completed"
+            || status == "closed"
+            || status == "superseded"
+            || status == "failed"
+        {
             continue;
         }
         let fm = note.fm();
@@ -1332,12 +1359,16 @@ pub fn build(
             || body_lower.contains("six-road")
             || body_lower.contains("6-road");
         let has_portfolio_id = fm.get_str("portfolio_id").is_some();
-        let has_road_ids = fm.get_list("road_ids").len() > 0;
+        let has_road_ids = !fm.get_list("road_ids").is_empty();
 
         if has_portfolio_id || has_road_ids || (has_portfolio_language && has_road_list) {
             active_legacy_portfolio_count += 1;
-            // Count declared child roads from body
-            declared_child_road_count += count_declared_roads(&note.body);
+            let road_ids = fm.get_list("road_ids");
+            declared_child_road_count += if road_ids.is_empty() {
+                count_declared_roads(&note.body)
+            } else {
+                crate::legacy_technology::extract_roads(&note.body, &road_ids).len()
+            };
         }
     }
 
@@ -1375,14 +1406,8 @@ mod tests {
 
     #[test]
     fn parse_cursor_basic() {
-        assert_eq!(
-            parse_cursor("^telegram--1003944547386-4668"),
-            Some(4668)
-        );
-        assert_eq!(
-            parse_cursor("^telegram--1003944547386-100"),
-            Some(100)
-        );
+        assert_eq!(parse_cursor("^telegram--1003944547386-4668"), Some(4668));
+        assert_eq!(parse_cursor("^telegram--1003944547386-100"), Some(100));
         assert_eq!(parse_cursor("^not-a-cursor"), None);
     }
 
@@ -1496,7 +1521,10 @@ Second message.
         let config = Config::default();
         let mentions = find_mentions(&messages, &identities, &config);
         assert_eq!(mentions.len(), 1);
-        assert_eq!(mentions[0].identity_key, "path:30 World/People/Mara Kest.md");
+        assert_eq!(
+            mentions[0].identity_key,
+            "path:30 World/People/Mara Kest.md"
+        );
     }
 
     #[test]
@@ -1606,10 +1634,7 @@ Second message.
     #[test]
     fn normalize_text_handles_possessives() {
         // "Dorn Reach's" should normalize same as "Dorn Reach"
-        assert_eq!(
-            normalize_text("Dorn Reach's"),
-            normalize_text("Dorn Reach")
-        );
+        assert_eq!(normalize_text("Dorn Reach's"), normalize_text("Dorn Reach"));
         // Curly apostrophe
         assert_eq!(
             normalize_text("Dorn Reach\u{2019}s"),
@@ -1810,5 +1835,169 @@ Second message.
             .get("path:40 Civilization/Projects/Test.md")
             .unwrap();
         assert_eq!(act.last_material_cursor, Some(4526));
+    }
+
+    #[test]
+    fn reviewed_through_cursor_does_not_seed_materiality() {
+        use crate::frontmatter::parse;
+        use crate::vault::Note;
+
+        let fm = parse("---\ntype: project\nreviewed_through_cursor: 4534\n---\n# Test\n");
+        let note = Note {
+            path: "Test.md".into(),
+            frontmatter: fm.value,
+            body: fm.body,
+            content_hash: 0,
+            parse_error: None,
+            has_frontmatter: true,
+            curated: true,
+        };
+        let index = crate::vault::VaultIndex {
+            root: std::path::PathBuf::new(),
+            notes: vec![note],
+            all_files: HashSet::new(),
+            file_hashes: vec![],
+        };
+        let identities = vec![KnownIdentity {
+            key: "path:Test.md".to_string(),
+            canonical_id: None,
+            title: "Test".to_string(),
+            aliases: vec![],
+            note_path: "Test.md".to_string(),
+            type_name: "project".to_string(),
+            status: None,
+            lifecycle: None,
+        }];
+        let mut activity = HashMap::from([(
+            "path:Test.md".to_string(),
+            IdentityActivity {
+                last_material_cursor: Some(4526),
+                ..Default::default()
+            },
+        )]);
+
+        seed_canonical_materiality(&mut activity, &identities, &index);
+
+        assert_eq!(activity["path:Test.md"].last_material_cursor, Some(4526));
+    }
+
+    #[test]
+    fn structured_materiality_and_source_cursor_use_the_later_cursor() {
+        use crate::frontmatter::parse;
+        use crate::vault::Note;
+
+        let identities = vec![KnownIdentity {
+            key: "road".to_string(),
+            canonical_id: None,
+            title: "Road".to_string(),
+            aliases: vec![],
+            note_path: "Road.md".to_string(),
+            type_name: "road".to_string(),
+            status: None,
+            lifecycle: None,
+        }];
+        let messages = vec![SourceMessage {
+            file: "source.md".to_string(),
+            cursor: 4600,
+            timestamp: None,
+            speaker: "dm".to_string(),
+            speaker_class: SpeakerClass::Dm,
+            body: "[CL ACCEPT road=road]".to_string(),
+            line: 1,
+        }];
+        let receipts = parse_receipts(&messages);
+        let mut activity = aggregate_activity(&[], &receipts, &identities);
+        let fm = parse(
+            "---\ntype: road\nsource_cursor: 4526\nreviewed_through_cursor: 4534\n---\n# Road\n",
+        );
+        let index = crate::vault::VaultIndex {
+            root: std::path::PathBuf::new(),
+            notes: vec![Note {
+                path: "Road.md".into(),
+                frontmatter: fm.value,
+                body: fm.body,
+                content_hash: 0,
+                parse_error: None,
+                has_frontmatter: true,
+                curated: true,
+            }],
+            all_files: HashSet::new(),
+            file_hashes: vec![],
+        };
+        seed_canonical_materiality(&mut activity, &identities, &index);
+
+        assert_eq!(activity["road"].last_material_cursor, Some(4600));
+
+        let newer = parse(
+            "---\ntype: road\nsource_cursor: 4700\nreviewed_through_cursor: 4701\n---\n# Road\n",
+        );
+        let newer_index = crate::vault::VaultIndex {
+            root: std::path::PathBuf::new(),
+            notes: vec![Note {
+                path: "Road.md".into(),
+                frontmatter: newer.value,
+                body: newer.body,
+                content_hash: 0,
+                parse_error: None,
+                has_frontmatter: true,
+                curated: true,
+            }],
+            all_files: HashSet::new(),
+            file_hashes: vec![],
+        };
+        seed_canonical_materiality(&mut activity, &identities, &newer_index);
+        assert_eq!(activity["road"].last_material_cursor, Some(4700));
+    }
+
+    #[test]
+    fn source_frontmatter_never_enters_message_analysis() {
+        use crate::boundary::{BoundarySource, StateBoundary};
+
+        let dir = tempfile::tempdir().unwrap();
+        let source_path = dir.path().join("70 Sources/Telegram/Player/2026/probe.md");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\nfrontmatter_probe: |\n  ^telegram--999-100\n  **00:00 UTC** · the_mud_lounge_bot\n  Frontmatter Phantom appears.\n  [CL ACCEPT road=frontmatter-road]\n  ^telegram--999-101\n  **00:01 UTC** · the_mud_lounge_bot\n  Frontmatter Phantom appears again.\n---\n\n^telegram--999-200\n**00:02 UTC** · the_mud_lounge_bot\n\nOrdinary body text.\n",
+        )
+        .unwrap();
+
+        let config = Config::default();
+        let boundary = StateBoundary {
+            current_turn: None,
+            current_year: None,
+            last_resolved_year: None,
+            current_source_cursor: None,
+            canonical_materialized_cursor: None,
+            vault_revision: "test".to_string(),
+            source: BoundarySource::Derived,
+        };
+        let index = crate::vault::scan(dir.path(), &config).unwrap();
+        let source = build(dir.path(), &index, &config, &boundary);
+
+        assert_eq!(source.messages.len(), 1);
+        assert_eq!(source.messages[0].cursor, 200);
+        assert!(!source.messages[0].body.contains("Frontmatter Phantom"));
+        assert!(!source.messages[0].body.contains("[CL ACCEPT"));
+        assert!(!source
+            .candidates
+            .iter()
+            .any(|candidate| candidate.text == "Frontmatter Phantom"));
+        assert!(source.receipts.is_empty());
+
+        let identity_path = dir.path().join("30 World/People/Frontmatter Phantom.md");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            identity_path,
+            "---\ntype: person\nstatus: active\nretrieval_tier: canonical\n---\n# Frontmatter Phantom\n",
+        )
+        .unwrap();
+        let index_with_identity = crate::vault::scan(dir.path(), &config).unwrap();
+        let source_with_identity = build(dir.path(), &index_with_identity, &config, &boundary);
+
+        assert!(!source_with_identity.mentions.iter().any(|mention| {
+            mention.identity_key == "path:30 World/People/Frontmatter Phantom.md"
+        }));
+        assert!(source_with_identity.receipts.is_empty());
     }
 }

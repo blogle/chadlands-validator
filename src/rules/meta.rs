@@ -101,7 +101,7 @@ static RULES: &[RuleMeta] = &[
     rule!(
         "CHAD-YEAR-003",
         "future evidence year value",
-        "Correct the year field to not exceed current_year, or move the field to a target/review field if it describes a future plan.",
+        "Reconcile the source association and State Boundary first. If the evidence is confirmed unsupported, correct the record rather than changing its year downward solely because it is ahead of current_year.",
         20
     ),
     rule!(
@@ -126,7 +126,7 @@ static RULES: &[RuleMeta] = &[
     rule!(
         "CHAD-CURSOR-002",
         "cursor beyond current_source_cursor (future cursor)",
-        "Correct the cursor value to not exceed the vault's actual evidence frontier.",
+        "If the cursor exceeds collected authoritative source, correct the record. If it is within collected source but ahead of State Boundary, reconcile the State Boundary before altering the record.",
         30
     ),
     rule!(
@@ -401,7 +401,7 @@ static RULES: &[RuleMeta] = &[
     rule!(
         "TECH-MIG-001",
         "legacy technology-node requires semantic classification",
-        "Add road_id, capability_id, or portfolio_id to classify the legacy record.",
+        "Add road_id, capability_id, portfolio_id, or set `technology_class: historical-compatibility` to classify the legacy record.",
         69
     ),
     rule!(
@@ -468,10 +468,10 @@ mod tests {
 
     #[test]
     fn all_rule_ids_have_metadata() {
-    // Collect every rule ID used in Finding::new / finding() calls across
-    // the codebase. If a new rule is added but not in RULES, this test fails.
-    // *** UPDATE THIS LIST WHEN ADDING NEW RULES ***
-    let used_rules: Vec<&str> = vec![
+        // Collect every rule ID used in Finding::new / finding() calls across
+        // the codebase. If a new rule is added but not in RULES, this test fails.
+        // *** UPDATE THIS LIST WHEN ADDING NEW RULES ***
+        let used_rules: Vec<&str> = vec![
             "CHAD-SCHEMA-001",
             "CHAD-SCHEMA-002",
             "CHAD-SCHEMA-003",

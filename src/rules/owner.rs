@@ -50,8 +50,7 @@ fn check_note(ctx: &RuleContext, note: &Note, out: &mut Vec<Finding>) {
             Some(key) => {
                 if let Some(value) = fm.get_str(key) {
                     if is_unresolved(ctx.config, &value) {
-                        let field_permitted =
-                            permitted.iter().any(|p| p.eq_ignore_ascii_case(key));
+                        let field_permitted = permitted.iter().any(|p| p.eq_ignore_ascii_case(key));
                         if field_permitted {
                             out.push(finding(
                                 "CHAD-OWNER-002",

@@ -88,10 +88,7 @@ fn check_unresolved_stable_ids(
 }
 
 fn looks_like_stable_id(s: &str) -> bool {
-    s.starts_with("TR-")
-        || s.starts_with("CAP-")
-        || s.starts_with("TP-")
-        || s.starts_with("TN-")
+    s.starts_with("TR-") || s.starts_with("CAP-") || s.starts_with("TP-") || s.starts_with("TN-")
 }
 
 /// CHAD-COVER-002/003/004: check unresolved candidates.
@@ -101,11 +98,7 @@ fn looks_like_stable_id(s: &str) -> bool {
 /// - Lifecycle-shaped candidate → WARN only with strong structural evidence
 /// - Repeated proper-name → Continuity Report candidate only (not Vault Health WARN)
 /// - Single weak proper-name → Continuity Report INFO only
-fn check_candidates(
-    ctx: &RuleContext,
-    source_index: &SourceIndex,
-    out: &mut Vec<Finding>,
-) {
+fn check_candidates(ctx: &RuleContext, source_index: &SourceIndex, out: &mut Vec<Finding>) {
     for candidate in &source_index.candidates {
         match candidate.signal.as_str() {
             "stable-id-syntax" => {
@@ -125,39 +118,37 @@ fn check_candidates(
                     ));
                 }
             }
-            "proper-name" => {
+            "proper-name"
                 if candidate.occurrences >= ctx.config.proper_name_min_occurrences
-                    && candidate.distinct_messages >= ctx.config.proper_name_min_distinct_messages
-                {
-                    // Check if it looks lifecycle-shaped with strong structural evidence
-                    let lower = candidate.text.to_ascii_lowercase();
-                    let is_lifecycle = ctx
-                        .config
-                        .lifecycle_terms
-                        .iter()
-                        .any(|t| lower.contains(t.as_str()));
+                    && candidate.distinct_messages
+                        >= ctx.config.proper_name_min_distinct_messages =>
+            {
+                // Check if it looks lifecycle-shaped with strong structural evidence
+                let lower = candidate.text.to_ascii_lowercase();
+                let is_lifecycle = ctx
+                    .config
+                    .lifecycle_terms
+                    .iter()
+                    .any(|t| lower.contains(t.as_str()));
 
-                    if is_lifecycle && candidate.occurrences >= 10 {
-                        // Lifecycle-shaped with high occurrence count → WARN
-                        out.push(finding(
-                            "CHAD-COVER-003",
-                            ctx.sev("CHAD-COVER-003", crate::findings::Severity::Warn),
-                            None,
-                            format!(
-                                "repeated lifecycle-shaped candidate `{}` \
+                if is_lifecycle && candidate.occurrences >= 10 {
+                    // Lifecycle-shaped with high occurrence count → WARN
+                    out.push(finding(
+                        "CHAD-COVER-003",
+                        ctx.sev("CHAD-COVER-003", crate::findings::Severity::Warn),
+                        None,
+                        format!(
+                            "repeated lifecycle-shaped candidate `{}` \
                                  appears {} times across {} distinct message(s) \
                                  without materialization as a canonical record.",
-                                candidate.text,
-                                candidate.occurrences,
-                                candidate.distinct_messages,
-                            ),
-                        ));
-                    }
-                    // Otherwise: Continuity Report candidate only.
-                    // Do NOT emit Vault Health WARN for generic proper-name
-                    // candidates. They appear in the Continuity Report's
-                    // Coverage Candidates section instead.
+                            candidate.text, candidate.occurrences, candidate.distinct_messages,
+                        ),
+                    ));
                 }
+                // Otherwise: Continuity Report candidate only.
+                // Do NOT emit Vault Health WARN for generic proper-name
+                // candidates. They appear in the Continuity Report's
+                // Coverage Candidates section instead.
                 // Single weak candidate: Continuity Report INFO only (no finding)
             }
             _ => {}

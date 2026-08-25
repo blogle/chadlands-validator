@@ -250,7 +250,11 @@ pub fn scan(vault_root: &Path, config: &Config) -> std::io::Result<VaultIndex> {
         }
 
         let curated = is_curated(&rel);
-        let read_result = if curated { read_full(abs) } else { read_probe(abs) };
+        let read_result = if curated {
+            read_full(abs)
+        } else {
+            read_probe(abs)
+        };
         match read_result {
             Ok((raw, hash)) => {
                 file_hashes.push((rel_str.clone(), hash));
@@ -319,7 +323,10 @@ mod tests {
             "blocked: external",
             "freshness: blocked-external-awaiting-collector",
         ] {
-            assert!(test_note(marker, "").is_blocked_external(), "marker: {marker}");
+            assert!(
+                test_note(marker, "").is_blocked_external(),
+                "marker: {marker}"
+            );
         }
     }
 
@@ -330,20 +337,14 @@ mod tests {
             root: PathBuf::new(),
             notes: Vec::new(),
             all_files: HashSet::new(),
-            file_hashes: vec![
-                ("a.md".to_string(), 1),
-                ("b.md".to_string(), 2),
-            ],
+            file_hashes: vec![("a.md".to_string(), 1), ("b.md".to_string(), 2)],
         };
         a.file_hashes.sort();
         let mut b = VaultIndex {
             root: PathBuf::new(),
             notes: Vec::new(),
             all_files: HashSet::new(),
-            file_hashes: vec![
-                ("b.md".to_string(), 2),
-                ("a.md".to_string(), 1),
-            ],
+            file_hashes: vec![("b.md".to_string(), 2), ("a.md".to_string(), 1)],
         };
         b.file_hashes.sort();
         assert_eq!(a.fingerprint(), b.fingerprint());

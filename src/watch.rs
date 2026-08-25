@@ -105,11 +105,8 @@ pub fn watch(vault_root: &Path, config: &Config) -> Result<(), String> {
         }
         let mut changed: Vec<PathBuf> = Vec::new();
         collect(first.ok(), &mut changed);
-        loop {
-            match rx.recv_timeout(Duration::from_millis(config.debounce_ms)) {
-                Ok(res) => collect(Some(res), &mut changed),
-                Err(_) => break, // quiet window reached
-            }
+        while let Ok(res) = rx.recv_timeout(Duration::from_millis(config.debounce_ms)) {
+            collect(Some(res), &mut changed);
         }
 
         let touched: Vec<String> = changed

@@ -101,14 +101,23 @@ impl Findings {
     }
 
     pub fn errors(&self) -> usize {
-        self.items.iter().filter(|f| f.severity == Severity::Error).count()
+        self.items
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+            .count()
     }
 
     pub fn warnings(&self) -> usize {
-        self.items.iter().filter(|f| f.severity == Severity::Warn).count()
+        self.items
+            .iter()
+            .filter(|f| f.severity == Severity::Warn)
+            .count()
     }
 
     pub fn infos(&self) -> usize {
-        self.items.iter().filter(|f| f.severity == Severity::Info).count()
+        self.items
+            .iter()
+            .filter(|f| f.severity == Severity::Info)
+            .count()
     }
 }

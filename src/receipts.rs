@@ -67,18 +67,15 @@ pub fn build_road_states(receipts: &[ParsedReceipt]) -> HashMap<String, RoadRece
             }
             "TERMINAL" => {
                 state.terminal = true;
-                state.terminal_result = receipt
-                    .fields
-                    .get("result")
-                    .map(|s| s.to_uppercase());
+                state.terminal_result = receipt.fields.get("result").map(|s| s.to_uppercase());
                 if state.started_at.is_none() {
                     state.started_at = Some(receipt.cursor);
                 }
                 state.last_progress_at = Some(receipt.cursor);
                 // A terminal receipt resolves all partial components
-                state.resolved_components.extend(
-                    state.partial_components.iter().cloned(),
-                );
+                state
+                    .resolved_components
+                    .extend(state.partial_components.iter().cloned());
             }
             _ => {}
         }
@@ -118,10 +115,7 @@ pub fn check(ctx: &RuleContext, source_index: Option<&SourceIndex>) -> Vec<Findi
 
         // CHAD-RECEIPT-001: accepted but never started
         if lifecycle == "accepted" || lifecycle == "executing" {
-            let has_start = state
-                .as_ref()
-                .and_then(|s| s.started_at)
-                .is_some()
+            let has_start = state.as_ref().and_then(|s| s.started_at).is_some()
                 || fm.get_i64("started_year").is_some()
                 || fm.get_i64("started_cursor").is_some();
 
@@ -140,10 +134,7 @@ pub fn check(ctx: &RuleContext, source_index: Option<&SourceIndex>) -> Vec<Findi
 
         // CHAD-RECEIPT-002: executing with no progress
         if lifecycle == "executing" {
-            let has_progress = state
-                .as_ref()
-                .and_then(|s| s.last_progress_at)
-                .is_some();
+            let has_progress = state.as_ref().and_then(|s| s.last_progress_at).is_some();
             if !has_progress {
                 out.push(finding(
                     "CHAD-RECEIPT-002",

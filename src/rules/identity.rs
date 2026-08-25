@@ -99,9 +99,7 @@ pub fn check(ctx: &RuleContext) -> Vec<Finding> {
         let fm = note.fm();
 
         // CHAD-IDENTITY-003: a record that is its own second.
-        let lead = fm
-            .get_str("lead")
-            .or_else(|| fm.get_str("owner"));
+        let lead = fm.get_str("lead").or_else(|| fm.get_str("owner"));
         if let (Some(lead), Some(second)) = (lead, fm.get_str("second")) {
             if !is_unresolved_marker(ctx.config, &lead)
                 && !is_unresolved_marker(ctx.config, &second)
@@ -186,9 +184,7 @@ pub fn check(ctx: &RuleContext) -> Vec<Finding> {
                              any vault note. Correct the target path."
                         ),
                     )),
-                    Some(target_note)
-                        if target_note.is_active() && note.is_active() =>
-                    {
+                    Some(target_note) if target_note.is_active() && note.is_active() => {
                         out.push(finding(
                             "CHAD-IDENTITY-006",
                             ctx.sev("CHAD-IDENTITY-006", Severity::Error),

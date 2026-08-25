@@ -7,11 +7,9 @@
 //!    checkpoints) — emits WARN CHAD-STATE-001 because the vault is not
 //!    exposing the machine-readable boundary the contract requires.
 //!
-//! `vault_revision` is the git HEAD when clean; when the working tree is
-//! dirty the revision is `git:<sha>+wt:<fingerprint>` where the fingerprint
-//! covers every scanned note's path and content, so synchronous workflows
-//! validate the *exact resulting vault state*. Outside a git repo the bare
-//! fingerprint is used.
+//! `vault_revision` combines git HEAD (when available) with a fingerprint of
+//! every scanned validation input. Generated reports and validator config are
+//! tracked separately and cannot change the validated vault revision.
 
 use std::path::Path;
 use std::process::Command;
@@ -58,7 +56,7 @@ pub fn fnv1a(data: &[u8], seed: u64) -> u64 {
     h
 }
 
-fn git_revision(vault_root: &Path) -> Option<(String, bool)> {
+fn git_revision(vault_root: &Path) -> Option<String> {
     let out = Command::new("git")
         .args(["-C", &vault_root.to_string_lossy(), "rev-parse", "HEAD"])
         .output()
@@ -70,18 +68,12 @@ fn git_revision(vault_root: &Path) -> Option<(String, bool)> {
     if sha.is_empty() {
         return None;
     }
-    let status = Command::new("git")
-        .args(["-C", &vault_root.to_string_lossy(), "status", "--porcelain"])
-        .output()
-        .ok()?;
-    let dirty = !String::from_utf8_lossy(&status.stdout).trim().is_empty();
-    Some((sha, dirty))
+    Some(sha)
 }
 
 pub fn vault_revision(vault_root: &Path, index: &VaultIndex) -> String {
     match git_revision(vault_root) {
-        Some((sha, false)) => format!("git:{sha}"),
-        Some((sha, true)) => format!("git:{sha}+wt:{}", index.fingerprint()),
+        Some(sha) => format!("git:{sha}+vault:{}", index.fingerprint()),
         None => format!("wt:{}", index.fingerprint()),
     }
 }
@@ -187,7 +179,8 @@ pub fn resolve(
         ));
     }
 
-    findings.sort_by(|a, b| (a.severity, a.priority, a.rule).cmp(&(b.severity, b.priority, b.rule)));
+    findings
+        .sort_by(|a, b| (a.severity, a.priority, a.rule).cmp(&(b.severity, b.priority, b.rule)));
     b.vault_revision = revision;
     (b, findings)
 }
@@ -216,19 +209,13 @@ fn derive(
 
     let current_turn = runtime.iter().filter_map(|n| get(n, "turn")).max();
     let current_year = runtime.iter().filter_map(|n| get(n, "year")).max();
-    let current_source_cursor = runtime
-        .iter()
-        .filter_map(|n| get(n, "source_cursor"))
-        .max();
+    let current_source_cursor = runtime.iter().filter_map(|n| get(n, "source_cursor")).max();
     let last_resolved_year = runtime
         .iter()
         .filter_map(|n| get(n, "last_resolved_year"))
         .max();
 
-    let from_manifest = manifests
-        .iter()
-        .filter_map(|m| m.materialized_cursor)
-        .max();
+    let from_manifest = manifests.iter().filter_map(|m| m.materialized_cursor).max();
     let from_handoff = index
         .notes
         .iter()
@@ -248,6 +235,105 @@ fn derive(
     }
 }
 
+/// Classification of a cursor value relative to the State Boundary and
+/// the indexed direct-source frontier. This is the single source of truth
+/// for boundary diagnosis — all rules and renderers should use this
+/// instead of duplicating cursor-vs-boundary comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryDiagnosis {
+    /// Cursor is at or within the State Boundary.
+    WithinBoundary,
+    /// Cursor exceeds the State Boundary but is within the indexed
+    /// direct-source frontier. The State Boundary may be stale.
+    BoundaryTrailsCollectedEvidence,
+    /// Cursor exceeds both the State Boundary and the direct-source
+    /// frontier. The record's evidence is unsupported.
+    BeyondCollectedEvidence,
+    /// Boundary or frontier is unknown; cannot classify.
+    Unknown,
+}
+
+impl BoundaryDiagnosis {
+    /// Returns true if the cursor is ahead of the State Boundary but
+    /// still within collected evidence (boundary may be stale).
+    pub fn boundary_may_be_stale(self) -> bool {
+        matches!(self, BoundaryDiagnosis::BoundaryTrailsCollectedEvidence)
+    }
+
+    /// Returns true if the cursor genuinely exceeds collected evidence.
+    pub fn beyond_evidence(self) -> bool {
+        matches!(self, BoundaryDiagnosis::BeyondCollectedEvidence)
+    }
+}
+
+/// Classify a cursor value relative to the State Boundary and the
+/// indexed direct-source frontier.
+///
+/// - `cursor`: the value being diagnosed
+/// - `boundary_cursor`: `StateBoundary.current_source_cursor`
+/// - `direct_frontier`: `SourceIndex.max_source_cursor`
+pub fn diagnose_cursor(
+    cursor: i64,
+    boundary_cursor: Option<i64>,
+    direct_frontier: Option<i64>,
+) -> BoundaryDiagnosis {
+    match (boundary_cursor, direct_frontier) {
+        (Some(bc), Some(df)) => {
+            // A frontier that predates the State Boundary is internally
+            // inconsistent. Do not let either value manufacture a safe
+            // classification until that discrepancy is resolved.
+            if df < bc {
+                BoundaryDiagnosis::Unknown
+            } else if cursor <= bc {
+                BoundaryDiagnosis::WithinBoundary
+            } else if cursor <= df {
+                BoundaryDiagnosis::BoundaryTrailsCollectedEvidence
+            } else {
+                BoundaryDiagnosis::BeyondCollectedEvidence
+            }
+        }
+        (Some(bc), None) => {
+            if cursor <= bc {
+                BoundaryDiagnosis::WithinBoundary
+            } else {
+                BoundaryDiagnosis::Unknown
+            }
+        }
+        // A direct-source frontier cannot substitute for a missing State
+        // Boundary: the relationship being diagnosed is unknown.
+        (None, Some(_)) => BoundaryDiagnosis::Unknown,
+        (None, None) => BoundaryDiagnosis::Unknown,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFrontierRelationship {
+    BoundaryTrailsCollectedEvidence,
+    Equal,
+    BoundaryAheadOfCollectedEvidence,
+    BoundaryMissing,
+    DirectFrontierUnknown,
+    Unknown,
+}
+
+pub fn diagnose_source_frontiers(
+    boundary_cursor: Option<i64>,
+    direct_frontier: Option<i64>,
+) -> SourceFrontierRelationship {
+    match (boundary_cursor, direct_frontier) {
+        (Some(boundary), Some(frontier)) if boundary < frontier => {
+            SourceFrontierRelationship::BoundaryTrailsCollectedEvidence
+        }
+        (Some(boundary), Some(frontier)) if boundary > frontier => {
+            SourceFrontierRelationship::BoundaryAheadOfCollectedEvidence
+        }
+        (Some(_), Some(_)) => SourceFrontierRelationship::Equal,
+        (None, Some(_)) => SourceFrontierRelationship::BoundaryMissing,
+        (Some(_), None) => SourceFrontierRelationship::DirectFrontierUnknown,
+        (None, None) => SourceFrontierRelationship::Unknown,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +341,74 @@ mod tests {
     #[test]
     fn fnv_is_deterministic() {
         assert_eq!(fnv1a(b"hello", 0xcbf29ce484222325), 0xa430d84680aabd0b);
+    }
+
+    #[test]
+    fn diagnose_cursor_within_boundary() {
+        assert_eq!(
+            diagnose_cursor(100, Some(200), Some(300)),
+            BoundaryDiagnosis::WithinBoundary
+        );
+    }
+
+    #[test]
+    fn diagnose_cursor_boundary_trails() {
+        assert_eq!(
+            diagnose_cursor(250, Some(200), Some(300)),
+            BoundaryDiagnosis::BoundaryTrailsCollectedEvidence
+        );
+    }
+
+    #[test]
+    fn diagnose_cursor_beyond_evidence() {
+        assert_eq!(
+            diagnose_cursor(350, Some(200), Some(300)),
+            BoundaryDiagnosis::BeyondCollectedEvidence
+        );
+    }
+
+    #[test]
+    fn diagnose_cursor_missing_boundary_is_unknown() {
+        assert_eq!(
+            diagnose_cursor(100, None, Some(300)),
+            BoundaryDiagnosis::Unknown
+        );
+    }
+
+    #[test]
+    fn diagnose_cursor_unknown_frontier() {
+        assert_eq!(
+            diagnose_cursor(100, Some(200), None),
+            BoundaryDiagnosis::WithinBoundary
+        );
+        assert_eq!(
+            diagnose_cursor(250, Some(200), None),
+            BoundaryDiagnosis::Unknown
+        );
+    }
+
+    #[test]
+    fn diagnose_cursor_both_unknown() {
+        assert_eq!(diagnose_cursor(100, None, None), BoundaryDiagnosis::Unknown);
+    }
+
+    #[test]
+    fn diagnose_cursor_inconsistent_frontier_is_unknown() {
+        assert_eq!(
+            diagnose_cursor(100, Some(200), Some(150)),
+            BoundaryDiagnosis::Unknown
+        );
+    }
+
+    #[test]
+    fn source_frontier_relationship_is_shared_and_typed() {
+        assert_eq!(
+            diagnose_source_frontiers(Some(4664), Some(4741)),
+            SourceFrontierRelationship::BoundaryTrailsCollectedEvidence
+        );
+        assert_eq!(
+            diagnose_source_frontiers(Some(4741), Some(4741)),
+            SourceFrontierRelationship::Equal
+        );
     }
 }

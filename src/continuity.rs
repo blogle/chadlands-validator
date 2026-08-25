@@ -6,28 +6,29 @@
 
 use std::collections::HashSet;
 
-use crate::boundary::StateBoundary;
+use crate::boundary::{diagnose_source_frontiers, SourceFrontierRelationship, StateBoundary};
 use crate::config::Config;
 use crate::source_index::{resolve_cursor, SourceIndex};
 
 /// Render the Continuity Report as Markdown.
-pub fn render(
-    boundary: &StateBoundary,
-    source_index: &SourceIndex,
-    config: &Config,
-) -> String {
+pub fn render(boundary: &StateBoundary, source_index: &SourceIndex, config: &Config) -> String {
     let mut out = String::new();
 
     // Frontmatter
     out.push_str("---\n");
     out.push_str("type: continuity-report\n");
-    out.push_str(&format!(
-        "generated_at: {}\n",
-        chrono_utc_now()
-    ));
+    out.push_str(&format!("generated_at: {}\n", chrono_utc_now()));
     out.push_str(&format!(
         "validated_revision: {}\n",
         yaml_escape(&boundary.vault_revision)
+    ));
+    out.push_str(&format!(
+        "validator_build_revision: {}\n",
+        yaml_escape(crate::BUILD_REVISION)
+    ));
+    out.push_str(&format!(
+        "config_fingerprint: {}\n",
+        yaml_escape(&config.fingerprint())
     ));
     out.push_str("---\n\n");
 
@@ -65,8 +66,12 @@ fn render_boundary(
 ) {
     out.push_str("## Boundary\n\n");
     out.push_str(&format!(
-        "- validator revision: `{}`\n",
+        "- validator package version: `{}`\n",
         crate::VERSION
+    ));
+    out.push_str(&format!(
+        "- validator build revision: `{}`\n",
+        crate::BUILD_REVISION
     ));
     out.push_str(&format!(
         "- validated vault revision: `{}`\n",
@@ -103,14 +108,24 @@ fn render_boundary(
     ));
 
     // Classify boundary vs source frontier relationship
-    let relationship = match (boundary.current_source_cursor, source_index.max_source_cursor) {
-        (Some(b), Some(s)) if s > b => "SOURCE FRONTIER > STATE BOUNDARY — boundary may be stale",
-        (Some(b), Some(s)) if s < b => "SOURCE FRONTIER < STATE BOUNDARY — boundary ahead of indexed source",
-        (Some(b), Some(s)) if s == b => "SOURCE FRONTIER == STATE BOUNDARY",
-        (Some(_), Some(_)) => "SOURCE FRONTIER == STATE BOUNDARY",
-        (None, Some(_)) => "STATE BOUNDARY missing — source frontier known",
-        (Some(_), None) => "SOURCE FRONTIER unknown — no messages indexed",
-        (None, None) => "UNKNOWN",
+    let relationship = match diagnose_source_frontiers(
+        boundary.current_source_cursor,
+        source_index.max_source_cursor,
+    ) {
+        SourceFrontierRelationship::BoundaryTrailsCollectedEvidence => {
+            "SOURCE FRONTIER > STATE BOUNDARY — boundary may be stale"
+        }
+        SourceFrontierRelationship::BoundaryAheadOfCollectedEvidence => {
+            "SOURCE FRONTIER < STATE BOUNDARY — boundary ahead of indexed source"
+        }
+        SourceFrontierRelationship::Equal => "SOURCE FRONTIER == STATE BOUNDARY",
+        SourceFrontierRelationship::BoundaryMissing => {
+            "STATE BOUNDARY missing — source frontier known"
+        }
+        SourceFrontierRelationship::DirectFrontierUnknown => {
+            "SOURCE FRONTIER unknown — no messages indexed"
+        }
+        SourceFrontierRelationship::Unknown => "UNKNOWN",
     };
     out.push_str(&format!("- boundary relationship: {relationship}\n"));
 
@@ -140,7 +155,9 @@ fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _con
     };
 
     out.push_str("## Technology Monitoring Coverage\n\n");
-    out.push_str(&format!("- machine-readable portfolios indexed: {portfolio_count}\n"));
+    out.push_str(&format!(
+        "- machine-readable portfolios indexed: {portfolio_count}\n"
+    ));
     out.push_str(&format!("- machine-readable roads indexed: {road_count}\n"));
     out.push_str(&format!(
         "- machine-readable durable capabilities indexed: {capability_count}\n"
@@ -154,8 +171,12 @@ fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _con
     out.push_str(&format!(
         "- declared current roads behind legacy representation: {declared_child_roads}\n"
     ));
-    out.push_str(&format!("- receipt monitoring coverage: {receipt_coverage}\n"));
-    out.push_str(&format!("- capability dormancy coverage: {capability_coverage}\n"));
+    out.push_str(&format!(
+        "- receipt monitoring coverage: {receipt_coverage}\n"
+    ));
+    out.push_str(&format!(
+        "- capability dormancy coverage: {capability_coverage}\n"
+    ));
     out.push('\n');
 }
 
@@ -164,9 +185,18 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
     // Exclude deceased/closed/historical/completed/superseded entities from
     // strategy resurfacing (activity data is preserved, just not presented).
     let terminal_statuses: HashSet<&str> = [
-        "deceased", "closed", "completed", "superseded", "historical",
-        "deprecated", "missing", "not-applicable",
-    ].iter().copied().collect();
+        "deceased",
+        "closed",
+        "completed",
+        "superseded",
+        "historical",
+        "deprecated",
+        "missing",
+        "not-applicable",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     let mut candidates: Vec<ResurfacingCandidate> = Vec::new();
     let mut excluded_terminal = 0usize;
@@ -199,10 +229,10 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
         let last_material = activity.and_then(|a| a.last_material_cursor);
 
         // Resolve year from cursor
-        let last_mentioned_year = last_mentioned
-            .and_then(|c| resolve_cursor(&source_index.cursor_epochs, c).1);
-        let last_material_year = last_material
-            .and_then(|c| resolve_cursor(&source_index.cursor_epochs, c).1);
+        let last_mentioned_year =
+            last_mentioned.and_then(|c| resolve_cursor(&source_index.cursor_epochs, c).1);
+        let last_material_year =
+            last_material.and_then(|c| resolve_cursor(&source_index.cursor_epochs, c).1);
 
         // Check dormancy
         let mut is_dormant = false;
@@ -210,9 +240,10 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
 
         // Material dormancy takes priority
         if let Some(threshold) = config.material_dormancy_years {
-            if let (Some(last_year), Some(current_year)) =
-                (last_material_year, source_index.cursor_epochs.last().and_then(|e| e.year))
-            {
+            if let (Some(last_year), Some(current_year)) = (
+                last_material_year,
+                source_index.cursor_epochs.last().and_then(|e| e.year),
+            ) {
                 let age = current_year - last_year;
                 if age as f64 >= threshold {
                     is_dormant = true;
@@ -224,9 +255,10 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
         // Mention dormancy (only if not already flagged by material)
         if !is_dormant {
             if let Some(threshold) = config.mention_dormancy_years {
-                if let (Some(last_year), Some(current_year)) =
-                    (last_mentioned_year, source_index.cursor_epochs.last().and_then(|e| e.year))
-                {
+                if let (Some(last_year), Some(current_year)) = (
+                    last_mentioned_year,
+                    source_index.cursor_epochs.last().and_then(|e| e.year),
+                ) {
                     let age = current_year - last_year;
                     if age as f64 >= threshold {
                         is_dormant = true;
@@ -237,7 +269,9 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
         }
 
         // No mention at all in indexed source (only if no material evidence either)
-        if !is_dormant && last_mentioned.is_none() && last_material.is_none()
+        if !is_dormant
+            && last_mentioned.is_none()
+            && last_material.is_none()
             && !source_index.messages.is_empty()
         {
             is_dormant = true;
@@ -245,7 +279,9 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
         }
 
         // Has material evidence but no mention — still show but with different reason
-        if !is_dormant && last_mentioned.is_none() && last_material.is_some()
+        if !is_dormant
+            && last_mentioned.is_none()
+            && last_material.is_some()
             && !source_index.messages.is_empty()
         {
             is_dormant = true;
@@ -258,7 +294,7 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
                 type_name: identity.type_name.clone(),
                 last_mentioned_cursor: last_mentioned,
                 last_mentioned_year,
-                _last_material_cursor: last_material,
+                last_material_cursor: last_material,
                 last_material_year,
                 dormancy: dormancy_reason,
                 record_path: identity.note_path.clone(),
@@ -288,12 +324,14 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
     out.push_str("|---|---|---:|---:|---|---|\n");
 
     for c in candidates.iter().take(shown) {
+        let last_material_display =
+            format_material_cursor(c.last_material_cursor, c.last_material_year);
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | `{}` |\n",
             c.title,
             c.type_name,
             opt_i64(c.last_mentioned_year),
-            opt_i64(c.last_material_year),
+            last_material_display,
             c.dormancy,
             c.record_path,
         ));
@@ -324,11 +362,12 @@ fn render_receipts(out: &mut String, source_index: &SourceIndex, config: &Config
         if state.terminal {
             continue;
         }
-        let unresolved: Vec<&String> = state
+        let mut unresolved: Vec<&String> = state
             .partial_components
             .iter()
             .filter(|c| !state.resolved_components.contains(*c))
             .collect();
+        unresolved.sort();
 
         if !unresolved.is_empty() {
             owed.push(ReceiptOwed {
@@ -360,21 +399,28 @@ fn render_receipts(out: &mut String, source_index: &SourceIndex, config: &Config
         }
     }
 
+    owed.sort_by(|a, b| {
+        (&a.road_id, &a.lifecycle, &a.severity, &a.detail).cmp(&(
+            &b.road_id,
+            &b.lifecycle,
+            &b.severity,
+            &b.detail,
+        ))
+    });
+
     let total = owed.len();
     let shown = owed.len().min(config.max_receipts);
 
     out.push_str("## Owed Technology Receipts\n\n");
 
     if road_count == 0 {
-        out.push_str(&format!(
-            "No overdue receipts detected among **0** machine-readable active roads.\n\n"
-        ));
-        out.push_str(&format!(
+        out.push_str("No overdue receipts detected among **0** machine-readable active roads.\n\n");
+        out.push_str(
             "**Coverage incomplete:** technology receipt monitoring requires \
              machine-readable road records. The current active technology \
              frontier may be represented as legacy aggregates/projects and \
-             cannot yet be validated at road granularity.\n\n"
-        ));
+             cannot yet be validated at road granularity.\n\n",
+        );
         return;
     }
 
@@ -550,10 +596,6 @@ fn render_metrics(out: &mut String, source_index: &SourceIndex) {
         "- unresolved candidates: {}\n",
         source_index.candidates.len()
     ));
-    out.push_str(&format!(
-        "- index duration: {}ms\n",
-        source_index.index_duration_ms
-    ));
     out.push('\n');
 }
 
@@ -566,7 +608,7 @@ struct ResurfacingCandidate {
     type_name: String,
     last_mentioned_cursor: Option<i64>,
     last_mentioned_year: Option<i64>,
-    _last_material_cursor: Option<i64>,
+    last_material_cursor: Option<i64>,
     last_material_year: Option<i64>,
     dormancy: String,
     record_path: String,
@@ -600,6 +642,16 @@ fn opt_i64(v: Option<i64>) -> String {
     }
 }
 
+/// Format materiality using only values already established by source analysis.
+/// The cursor remains visible even when an epoch mapping also supplies a year.
+fn format_material_cursor(cursor: Option<i64>, year: Option<i64>) -> String {
+    match (cursor, year) {
+        (Some(cursor), Some(year)) => format!("cursor {cursor} / Year {year}"),
+        (Some(cursor), None) => format!("cursor {cursor}"),
+        (None, _) => "—".to_string(),
+    }
+}
+
 fn yaml_escape(s: &str) -> String {
     let needs_quoting = s.contains(':')
         || s.contains('#')
@@ -610,9 +662,7 @@ fn yaml_escape(s: &str) -> String {
     if !needs_quoting {
         return s.to_string();
     }
-    let escaped = s
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"");
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
 }
 
@@ -637,5 +687,20 @@ mod tests {
     fn yaml_escape_basic() {
         assert_eq!(yaml_escape("hello"), "hello");
         assert_eq!(yaml_escape("has: colon"), "\"has: colon\"");
+    }
+
+    #[test]
+    fn material_cursor_display_preserves_unmapped_cursor() {
+        let rendered = format_material_cursor(Some(4526), None);
+        assert!(rendered.contains("4526"));
+        assert!(!rendered.contains('—'));
+    }
+
+    #[test]
+    fn material_cursor_display_includes_cursor_and_mapped_year() {
+        assert_eq!(
+            format_material_cursor(Some(4526), Some(37)),
+            "cursor 4526 / Year 37"
+        );
     }
 }

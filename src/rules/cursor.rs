@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use crate::boundary::{self, BoundaryDiagnosis};
 use crate::findings::{Finding, Severity};
 use crate::manifest::{latest, Disposition};
 use crate::rules::{finding, RuleContext};
@@ -43,37 +44,47 @@ pub fn check(ctx: &RuleContext) -> Vec<Finding> {
         }
 
         // CHAD-CURSOR-002: future cursors.
-        // Distinguish between:
-        // - cursor > State Boundary but <= max direct-source cursor (stale boundary)
-        // - cursor > max direct-source cursor (genuinely unsupported)
+        // Use shared boundary diagnosis for consistent classification.
         if let Some(frontier) = boundary.current_source_cursor {
-            for (field, value) in [("source_cursor", source), ("reviewed_through_cursor", reviewed)]
-            {
+            let max_source = ctx.source_index.and_then(|si| si.max_source_cursor);
+
+            for (field, value) in [
+                ("source_cursor", source),
+                ("reviewed_through_cursor", reviewed),
+            ] {
                 if let Some(v) = value {
                     if v > frontier {
-                        // Check if the cursor is within the indexed direct-source range
-                        let max_source = ctx
-                            .source_index
-                            .and_then(|si| si.max_source_cursor);
-                        let in_source_range = max_source.map(|m| v <= m).unwrap_or(false);
+                        let diag = boundary::diagnose_cursor(v, Some(frontier), max_source);
 
-                        let message = if in_source_range {
-                            format!(
-                                "`{field}: {v}` exceeds the authoritative \
-                                 State Boundary current_source_cursor {frontier} \
-                                 but is within the indexed direct-source frontier \
-                                 ({max_source:?}). The State Boundary may be stale. \
-                                 Determine whether the boundary needs updating before \
-                                 altering the record."
-                            )
-                        } else {
-                            format!(
-                                "`{field}: {v}` exceeds both the authoritative \
-                                 State Boundary current_source_cursor {frontier} \
-                                 and the maximum indexed direct-source cursor \
-                                 ({max_source:?}). Correct the cursor to not \
-                                 exceed the actual evidence frontier."
-                            )
+                        let message = match diag {
+                            BoundaryDiagnosis::BoundaryTrailsCollectedEvidence => {
+                                format!(
+                                    "`{field}: {v}` exceeds the authoritative \
+                                     State Boundary current_source_cursor {frontier} \
+                                     but is within the indexed direct-source frontier \
+                                     ({max_source:?}). The State Boundary may be stale. \
+                                     Reconcile the authoritative boundary before altering \
+                                     the record."
+                                )
+                            }
+                            BoundaryDiagnosis::BeyondCollectedEvidence => {
+                                format!(
+                                    "`{field}: {v}` exceeds both the authoritative \
+                                     State Boundary current_source_cursor {frontier} \
+                                     and the maximum indexed direct-source cursor \
+                                     ({max_source:?}). The record's evidence is \
+                                     unsupported. Correct the cursor to not exceed \
+                                     the actual evidence frontier."
+                                )
+                            }
+                            _ => {
+                                format!(
+                                    "`{field}: {v}` exceeds the authoritative \
+                                     State Boundary current_source_cursor {frontier}. \
+                                     Determine whether the boundary needs updating \
+                                     or the record needs correction."
+                                )
+                            }
                         };
                         out.push(finding(
                             "CHAD-CURSOR-002",
@@ -138,7 +149,10 @@ pub fn check(ctx: &RuleContext) -> Vec<Finding> {
         }
 
         for s in &m.subjects {
-            if matches!(s.disposition, Disposition::BlockedExternal | Disposition::Invalid(_)) {
+            if matches!(
+                s.disposition,
+                Disposition::BlockedExternal | Disposition::Invalid(_)
+            ) {
                 continue;
             }
             if let Some(note) = ctx.index.find_by_path(&s.path) {

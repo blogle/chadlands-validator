@@ -7,6 +7,7 @@ use std::path::Path;
 
 use yaml_rust2::{Yaml, YamlLoader};
 
+use crate::boundary::fnv1a;
 use crate::findings::Severity;
 use crate::frontmatter::FmView;
 
@@ -275,9 +276,7 @@ impl Default for Config {
             max_findings_per_rule: 25,
             debounce_ms: 750,
             // Source index
-            direct_source_prefixes: vec![
-                "70 Sources/Telegram/Player".into(),
-            ],
+            direct_source_prefixes: vec!["70 Sources/Telegram/Player".into()],
             player_speakers: vec![],
             dm_speakers: vec!["the_mud_lounge_bot".into()],
             // Identity
@@ -394,33 +393,45 @@ impl Config {
             cfg.chronicle_dir = v;
         }
         if let Some(d) = doc["exclude_dirs"].as_vec() {
-            cfg.exclude_dirs = d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.exclude_dirs = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["protected_prefixes"].as_vec() {
-            cfg.protected_prefixes =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.protected_prefixes = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["chronicle_permitted_gaps"].as_vec() {
             cfg.chronicle_permitted_gaps = d.iter().filter_map(|y| y.as_i64()).collect();
         }
         if let Some(d) = doc["id_fields"].as_vec() {
-            cfg.id_fields = d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.id_fields = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["unresolved_values"].as_vec() {
-            cfg.unresolved_values =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.unresolved_values = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Yaml::Hash(h) = &doc["required_fields"] {
             for (k, v) in h {
                 if let Some(t) = k.as_str() {
-                    cfg.required_fields.insert(t.to_string(), field_requirements(v));
+                    cfg.required_fields
+                        .insert(t.to_string(), field_requirements(v));
                 }
             }
         }
         if let Yaml::Hash(h) = &doc["unresolved_permitted"] {
             for (k, v) in h {
                 if let Some(t) = k.as_str() {
-                    cfg.unresolved_permitted.insert(t.to_string(), yaml_str_list(v));
+                    cfg.unresolved_permitted
+                        .insert(t.to_string(), yaml_str_list(v));
                 }
             }
         }
@@ -441,7 +452,8 @@ impl Config {
         if let Yaml::Hash(h) = &doc["required_sections"] {
             for (k, v) in h {
                 if let Some(t) = k.as_str() {
-                    cfg.required_sections.insert(t.to_string(), yaml_str_list(v));
+                    cfg.required_sections
+                        .insert(t.to_string(), yaml_str_list(v));
                 }
             }
         }
@@ -469,25 +481,35 @@ impl Config {
             cfg.continuity_report_path = v;
         }
         if let Some(d) = doc["direct_source_prefixes"].as_vec() {
-            cfg.direct_source_prefixes =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.direct_source_prefixes = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["player_speakers"].as_vec() {
-            cfg.player_speakers =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.player_speakers = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["dm_speakers"].as_vec() {
-            cfg.dm_speakers =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.dm_speakers = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         // --- Identity ---
         if let Some(d) = doc["tracked_types"].as_vec() {
-            cfg.tracked_types =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.tracked_types = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["ignored_aliases"].as_vec() {
-            cfg.ignored_aliases =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.ignored_aliases = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         // --- Continuity thresholds ---
         if let Some(v) = doc["mention_dormancy_years"].as_f64() {
@@ -507,65 +529,97 @@ impl Config {
         }
         // --- Continuity rendered limits ---
         if let Some(n) = doc["max_resurfacing"].as_i64() {
-            if n > 0 { cfg.max_resurfacing = n as usize; }
+            if n > 0 {
+                cfg.max_resurfacing = n as usize;
+            }
         }
         if let Some(n) = doc["max_receipts"].as_i64() {
-            if n > 0 { cfg.max_receipts = n as usize; }
+            if n > 0 {
+                cfg.max_receipts = n as usize;
+            }
         }
         if let Some(n) = doc["max_capabilities"].as_i64() {
-            if n > 0 { cfg.max_capabilities = n as usize; }
+            if n > 0 {
+                cfg.max_capabilities = n as usize;
+            }
         }
         if let Some(n) = doc["max_coverage_candidates"].as_i64() {
-            if n > 0 { cfg.max_coverage_candidates = n as usize; }
+            if n > 0 {
+                cfg.max_coverage_candidates = n as usize;
+            }
         }
         if let Some(n) = doc["max_legacy_debt"].as_i64() {
-            if n > 0 { cfg.max_legacy_debt = n as usize; }
+            if n > 0 {
+                cfg.max_legacy_debt = n as usize;
+            }
         }
         // --- Technology ---
         if let Some(d) = doc["portfolio_types"].as_vec() {
-            cfg.portfolio_types =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.portfolio_types = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["road_types"].as_vec() {
-            cfg.road_types =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.road_types = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["capability_types"].as_vec() {
-            cfg.capability_types =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.capability_types = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["legacy_technology_types"].as_vec() {
-            cfg.legacy_technology_types =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.legacy_technology_types = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         // --- Receipt authority ---
         if let Some(d) = doc["receipt_authority_player"].as_vec() {
-            cfg.receipt_authority_player =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.receipt_authority_player = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["receipt_authority_dm"].as_vec() {
-            cfg.receipt_authority_dm =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.receipt_authority_dm = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         // --- Coverage ---
         if let Some(n) = doc["proper_name_min_occurrences"].as_i64() {
-            if n > 0 { cfg.proper_name_min_occurrences = n as usize; }
+            if n > 0 {
+                cfg.proper_name_min_occurrences = n as usize;
+            }
         }
         if let Some(n) = doc["proper_name_min_distinct_messages"].as_i64() {
-            if n > 0 { cfg.proper_name_min_distinct_messages = n as usize; }
+            if n > 0 {
+                cfg.proper_name_min_distinct_messages = n as usize;
+            }
         }
         if let Some(d) = doc["lifecycle_terms"].as_vec() {
-            cfg.lifecycle_terms =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.lifecycle_terms = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         if let Some(d) = doc["role_phrases"].as_vec() {
-            cfg.role_phrases =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.role_phrases = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         // --- Migration ---
         if let Some(d) = doc["migration_rules"].as_vec() {
-            cfg.migration_rules =
-                d.iter().filter_map(|y| y.as_str().map(String::from)).collect();
+            cfg.migration_rules = d
+                .iter()
+                .filter_map(|y| y.as_str().map(String::from))
+                .collect();
         }
         Ok(cfg)
     }
@@ -589,6 +643,184 @@ impl Config {
             .get(rule)
             .copied()
             .unwrap_or(default)
+    }
+
+    /// Deterministic fingerprint of the effective configuration.
+    /// Covers all fields that affect validation output. Used for
+    /// delta provenance: changes to config produce a different fingerprint.
+    pub fn fingerprint(&self) -> String {
+        fn frame(target: &mut Vec<u8>, key: &str, value: &[u8]) {
+            target.extend_from_slice(&(key.len() as u64).to_le_bytes());
+            target.extend_from_slice(key.as_bytes());
+            target.extend_from_slice(&(value.len() as u64).to_le_bytes());
+            target.extend_from_slice(value);
+        }
+        fn strings(values: &[String]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for value in values {
+                frame(&mut out, "item", value.as_bytes());
+            }
+            out
+        }
+        fn integers(values: &[i64]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for value in values {
+                frame(&mut out, "item", &value.to_le_bytes());
+            }
+            out
+        }
+        fn string_map(values: &HashMap<String, String>) -> Vec<u8> {
+            let mut keys: Vec<_> = values.keys().collect();
+            keys.sort();
+            let mut out = Vec::new();
+            for key in keys {
+                frame(&mut out, key, values[key].as_bytes());
+            }
+            out
+        }
+        fn list_map(values: &HashMap<String, Vec<String>>) -> Vec<u8> {
+            let mut keys: Vec<_> = values.keys().collect();
+            keys.sort();
+            let mut out = Vec::new();
+            for key in keys {
+                frame(&mut out, key, &strings(&values[key]));
+            }
+            out
+        }
+
+        let mut data = b"chadlands-validator-config-v1".to_vec();
+        macro_rules! text {
+            ($field:ident) => {
+                frame(&mut data, stringify!($field), self.$field.as_bytes())
+            };
+        }
+        macro_rules! list {
+            ($field:ident) => {
+                frame(&mut data, stringify!($field), &strings(&self.$field))
+            };
+        }
+        macro_rules! number {
+            ($field:ident) => {
+                frame(
+                    &mut data,
+                    stringify!($field),
+                    &(self.$field as u64).to_le_bytes(),
+                )
+            };
+        }
+
+        text!(report_path);
+        text!(boundary_path);
+        text!(continuity_report_path);
+        list!(exclude_dirs);
+        list!(protected_prefixes);
+        text!(chronicle_dir);
+        frame(
+            &mut data,
+            "chronicle_permitted_gaps",
+            &integers(&self.chronicle_permitted_gaps),
+        );
+        list!(id_fields);
+        list!(unresolved_values);
+
+        let mut required_keys: Vec<_> = self.required_fields.keys().collect();
+        required_keys.sort();
+        let mut required = Vec::new();
+        for key in required_keys {
+            let mut requirements = Vec::new();
+            for requirement in &self.required_fields[key] {
+                frame(
+                    &mut requirements,
+                    "requirement",
+                    &strings(&requirement.alternatives),
+                );
+            }
+            frame(&mut required, key, &requirements);
+        }
+        frame(&mut data, "required_fields", &required);
+        frame(
+            &mut data,
+            "unresolved_permitted",
+            &list_map(&self.unresolved_permitted),
+        );
+        frame(&mut data, "status_vocab", &list_map(&self.status_vocab));
+        frame(
+            &mut data,
+            "type_to_vocab_class",
+            &string_map(&self.type_to_vocab_class),
+        );
+        frame(
+            &mut data,
+            "required_sections",
+            &list_map(&self.required_sections),
+        );
+
+        let mut severity_keys: Vec<_> = self.severity_overrides.keys().collect();
+        severity_keys.sort();
+        let mut severities = Vec::new();
+        for key in severity_keys {
+            frame(
+                &mut severities,
+                key,
+                self.severity_overrides[key].label().as_bytes(),
+            );
+        }
+        frame(&mut data, "severity_overrides", &severities);
+
+        number!(max_findings_per_rule);
+        number!(debounce_ms);
+        list!(direct_source_prefixes);
+        list!(player_speakers);
+        list!(dm_speakers);
+        list!(tracked_types);
+        list!(ignored_aliases);
+
+        for (key, value) in [
+            ("mention_dormancy_years", self.mention_dormancy_years),
+            ("material_dormancy_years", self.material_dormancy_years),
+            ("capability_dormancy_years", self.capability_dormancy_years),
+        ] {
+            match value {
+                Some(value) => frame(
+                    &mut data,
+                    key,
+                    &[b"some:".as_slice(), &value.to_bits().to_le_bytes()].concat(),
+                ),
+                None => frame(&mut data, key, b"none"),
+            }
+        }
+        for (key, value) in [
+            ("mention_dormancy_turns", self.mention_dormancy_turns),
+            ("material_dormancy_turns", self.material_dormancy_turns),
+        ] {
+            match value {
+                Some(value) => frame(
+                    &mut data,
+                    key,
+                    &[b"some:".as_slice(), &value.to_le_bytes()].concat(),
+                ),
+                None => frame(&mut data, key, b"none"),
+            }
+        }
+
+        number!(max_resurfacing);
+        number!(max_receipts);
+        number!(max_capabilities);
+        number!(max_coverage_candidates);
+        number!(max_legacy_debt);
+        list!(portfolio_types);
+        list!(road_types);
+        list!(capability_types);
+        list!(legacy_technology_types);
+        list!(receipt_authority_player);
+        list!(receipt_authority_dm);
+        number!(proper_name_min_occurrences);
+        number!(proper_name_min_distinct_messages);
+        list!(lifecycle_terms);
+        list!(role_phrases);
+        list!(migration_rules);
+
+        format!("{:016x}", fnv1a(&data, 0xcbf29ce484222325))
     }
 }
 
@@ -630,5 +862,54 @@ mod tests {
         );
         // Untouched defaults survive.
         assert_eq!(c.chronicle_dir, "20 Chronicle");
+    }
+
+    #[test]
+    fn fingerprint_is_stable_and_distinguishes_none_from_zero() {
+        let base = Config::default();
+        assert_eq!(base.fingerprint(), base.clone().fingerprint());
+
+        let mut none = base.clone();
+        none.mention_dormancy_turns = None;
+        let mut zero = base.clone();
+        zero.mention_dormancy_turns = Some(0);
+        assert_ne!(none.fingerprint(), zero.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_covers_all_previously_omitted_effective_fields() {
+        let base = Config::default();
+        let expected = base.fingerprint();
+        macro_rules! changes {
+            ($mutation:expr) => {{
+                let mut changed = base.clone();
+                $mutation(&mut changed);
+                assert_ne!(expected, changed.fingerprint());
+            }};
+        }
+
+        changes!(|config: &mut Config| config.chronicle_permitted_gaps.push(99));
+        changes!(|config: &mut Config| config
+            .unresolved_permitted
+            .entry("person".into())
+            .or_default()
+            .push("owner".into()));
+        changes!(|config: &mut Config| {
+            config
+                .type_to_vocab_class
+                .insert("new".into(), "project".into());
+        });
+        changes!(|config: &mut Config| config
+            .required_sections
+            .entry("new".into())
+            .or_default()
+            .push("Boundary".into()));
+        changes!(|config: &mut Config| config.max_resurfacing += 1);
+        changes!(|config: &mut Config| config.max_receipts += 1);
+        changes!(|config: &mut Config| config.max_capabilities += 1);
+        changes!(|config: &mut Config| config.max_coverage_candidates += 1);
+        changes!(|config: &mut Config| config.max_legacy_debt += 1);
+        changes!(|config: &mut Config| config.proper_name_min_occurrences += 1);
+        changes!(|config: &mut Config| config.proper_name_min_distinct_messages += 1);
     }
 }

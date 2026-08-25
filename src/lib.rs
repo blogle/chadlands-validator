@@ -13,6 +13,7 @@ pub mod continuity;
 pub mod coverage;
 pub mod findings;
 pub mod frontmatter;
+pub mod legacy_technology;
 pub mod manifest;
 pub mod migration;
 pub mod receipts;
@@ -29,16 +30,10 @@ use findings::{Findings, Severity};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Canonical road names in the Chadlands portfolio.
-/// Used by source_index and technology modules for consistent road counting.
-pub const KNOWN_ROADS: &[&str] = &[
-    "Steam",
-    "Cold-Hardy Grain",
-    "Sampling & Error Bands",
-    "Irrigation",
-    "Managed Woodland",
-    "Warehouse Receipts",
-];
+/// Validator build fingerprint: git SHA of the validator source at
+/// compile time. Used for delta provenance to distinguish validator
+/// changes from vault changes.
+pub const BUILD_REVISION: &str = env!("VALIDATOR_GIT_SHA");
 
 pub struct ValidationOutcome {
     pub boundary: boundary::StateBoundary,
@@ -144,8 +139,14 @@ pub fn validate_and_report_with_config_path(
         .map_err(|e| format!("cannot write report {}: {e}", config.report_path))?;
     // Write continuity report if available
     if let Some(ref continuity_md) = outcome.continuity_report_markdown {
-        report::write_report(vault_root, &config.continuity_report_path, continuity_md)
-            .map_err(|e| format!("cannot write continuity report {}: {e}", config.continuity_report_path))?;
+        report::write_report(vault_root, &config.continuity_report_path, continuity_md).map_err(
+            |e| {
+                format!(
+                    "cannot write continuity report {}: {e}",
+                    config.continuity_report_path
+                )
+            },
+        )?;
     }
     Ok(outcome)
 }

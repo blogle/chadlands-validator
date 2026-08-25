@@ -48,7 +48,10 @@ fn check_road_ids(ctx: &RuleContext, out: &mut Vec<Finding>) {
 
         match fm.get_str("road_id") {
             Some(id) if !id.trim().is_empty() => {
-                seen_ids.entry(id.trim().to_string()).or_default().push(note);
+                seen_ids
+                    .entry(id.trim().to_string())
+                    .or_default()
+                    .push(note);
             }
             _ if is_active => {
                 out.push(finding(
@@ -125,7 +128,7 @@ fn check_due_boundary(ctx: &RuleContext, note: &Note, out: &mut Vec<Finding>) {
     // This is a structural check: the field should exist if the schema requires it
     // We don't enforce it universally — only when the road has a produces field
     // (indicating it's expected to produce something).
-    let has_produces = fm.get_list("produces").len() > 0;
+    let has_produces = !fm.get_list("produces").is_empty();
     if has_produces && fm.get_i64("terminal_due_year").is_none() {
         // This is a soft check — not all roads need a due year
         // Only warn if the road is actively executing
@@ -175,9 +178,9 @@ fn check_terminal_results(ctx: &RuleContext, out: &mut Vec<Finding>) {
 
         // Terminal road must have a result or receipt mapping
         let has_result = fm.get_str("result").is_some();
-        let has_terminal_receipt = fm.get_str("terminal_result").is_some()
-            || fm.get_str("receipt").is_some();
-        let has_produces = fm.get_list("produces").len() > 0;
+        let has_terminal_receipt =
+            fm.get_str("terminal_result").is_some() || fm.get_str("receipt").is_some();
+        let has_produces = !fm.get_list("produces").is_empty();
 
         if !has_result && !has_terminal_receipt && !has_produces {
             out.push(finding(
@@ -281,11 +284,7 @@ fn check_portfolio_children(ctx: &RuleContext, out: &mut Vec<Finding>) {
                     .iter()
                     .any(|t| n.type_str().as_deref() == Some(t.as_str()))
         })
-        .filter_map(|n| {
-            n.fm()
-                .get_str("road_id")
-                .map(|s| s.trim().to_string())
-        })
+        .filter_map(|n| n.fm().get_str("road_id").map(|s| s.trim().to_string()))
         .collect();
 
     for note in &ctx.index.notes {
@@ -436,6 +435,8 @@ fn check_attained_capabilities(ctx: &RuleContext, out: &mut Vec<Finding>) {
 
 fn check_legacy_compatibility(ctx: &RuleContext, out: &mut Vec<Finding>) {
     // TECH-MIG-001: legacy technology-node needs classification
+    // Valid classifications: road_id, capability_id, portfolio_id,
+    // or technology_class: historical-compatibility
     for note in &ctx.index.notes {
         if !note.curated || note.parse_error.is_some() {
             continue;
@@ -450,11 +451,20 @@ fn check_legacy_compatibility(ctx: &RuleContext, out: &mut Vec<Finding>) {
             continue;
         }
         let fm = note.fm();
-        let has_road_id = fm.get_str("road_id").is_some();
-        let has_capability_id = fm.get_str("capability_id").is_some();
-        let has_portfolio_id = fm.get_str("portfolio_id").is_some();
-
-        if !has_road_id && !has_capability_id && !has_portfolio_id {
+        let classifications = legacy_classifications(&fm);
+        if classifications.len() != 1 {
+            let detail = if classifications.is_empty() {
+                "no valid classification is present".to_string()
+            } else {
+                format!(
+                    "multiple classifications are present ({})",
+                    classifications
+                        .iter()
+                        .map(|class| class.label())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
             out.push(finding(
                 "TECH-MIG-001",
                 ctx.sev("TECH-MIG-001", crate::findings::Severity::Warn),
@@ -463,8 +473,10 @@ fn check_legacy_compatibility(ctx: &RuleContext, out: &mut Vec<Finding>) {
                     "legacy technology-node `{}` requires semantic \
                      classification as portfolio, road, capability, or \
                      historical compatibility object. Add road_id, \
-                     capability_id, or portfolio_id.",
-                    note.title()
+                     capability_id, portfolio_id, or set \
+                     `technology_class: historical-compatibility`. Exactly one \
+                     classification path is allowed; {detail}.",
+                    note.title(),
                 ),
             ));
         }
@@ -533,14 +545,18 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
             continue;
         }
         let status = note.status().unwrap_or_default();
-        if status == "completed" || status == "closed" || status == "superseded" || status == "failed" {
+        if status == "completed"
+            || status == "closed"
+            || status == "superseded"
+            || status == "failed"
+        {
             continue;
         }
 
         let fm = note.fm();
         // Check for portfolio signals in frontmatter
         let has_portfolio_id = fm.get_str("portfolio_id").is_some();
-        let has_road_ids = fm.get_list("road_ids").len() > 0;
+        let has_road_ids = !fm.get_list("road_ids").is_empty();
 
         // Check body for strong portfolio signals
         let body_lower = note.body.to_ascii_lowercase();
@@ -553,8 +569,8 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
         if has_portfolio_id || has_road_ids || (has_portfolio_language && has_road_list) {
             // This is a legacy technology-bearing portfolio
             if road_count == 0 {
-                // Extract declared road names from the body
-                let declared_roads = extract_road_names(&note.body);
+                let declared_roads =
+                    crate::legacy_technology::extract_roads(&note.body, &fm.get_list("road_ids"));
                 let road_list = if declared_roads.is_empty() {
                     String::new()
                 } else {
@@ -562,7 +578,7 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
                         "\n\nDeclared child roads:\n{}",
                         declared_roads
                             .iter()
-                            .map(|r| format!("- {r}"))
+                            .map(|road| format!("- {}", road.name))
                             .collect::<Vec<_>>()
                             .join("\n")
                     )
@@ -595,18 +611,50 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
     }
 }
 
-/// Extract declared road names from a legacy portfolio's body text.
-fn extract_road_names(body: &str) -> Vec<String> {
-    let body_lower = body.to_ascii_lowercase().replace('&', "and");
-    let mut found = Vec::new();
-    let mut seen = HashSet::new();
-    for road in crate::KNOWN_ROADS {
-        let lower = road.to_ascii_lowercase().replace('&', "and");
-        if body_lower.contains(&lower) && seen.insert(lower) {
-            found.push(road.to_string());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegacyTechnologyClassification {
+    Portfolio,
+    Road,
+    Capability,
+    HistoricalCompatibility,
+}
+
+impl LegacyTechnologyClassification {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Portfolio => "portfolio",
+            Self::Road => "road",
+            Self::Capability => "capability",
+            Self::HistoricalCompatibility => "historical compatibility",
         }
     }
-    found
+}
+
+fn nonempty(value: Option<String>) -> bool {
+    value.map(|value| !value.trim().is_empty()).unwrap_or(false)
+}
+
+fn legacy_classifications(
+    fm: &crate::frontmatter::FmView<'_>,
+) -> Vec<LegacyTechnologyClassification> {
+    let mut classes = Vec::new();
+    if nonempty(fm.get_str("portfolio_id")) {
+        classes.push(LegacyTechnologyClassification::Portfolio);
+    }
+    if nonempty(fm.get_str("road_id")) {
+        classes.push(LegacyTechnologyClassification::Road);
+    }
+    if nonempty(fm.get_str("capability_id")) {
+        classes.push(LegacyTechnologyClassification::Capability);
+    }
+    if fm
+        .get_str("technology_class")
+        .map(|value| value.trim() == "historical-compatibility")
+        .unwrap_or(false)
+    {
+        classes.push(LegacyTechnologyClassification::HistoricalCompatibility);
+    }
+    classes
 }
 
 // ---------------------------------------------------------------------------
@@ -683,4 +731,45 @@ fn check_capability_migration(ctx: &RuleContext, out: &mut Vec<Finding>) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::frontmatter::{parse, FmView};
+
+    fn classes(frontmatter: &str) -> Vec<LegacyTechnologyClassification> {
+        let parsed = parse(frontmatter);
+        legacy_classifications(&FmView::new(&parsed.value))
+    }
+
+    #[test]
+    fn all_four_legacy_classification_paths_are_bounded() {
+        assert_eq!(
+            classes("---\nportfolio_id: p\n---\n"),
+            vec![LegacyTechnologyClassification::Portfolio]
+        );
+        assert_eq!(
+            classes("---\nroad_id: r\n---\n"),
+            vec![LegacyTechnologyClassification::Road]
+        );
+        assert_eq!(
+            classes("---\ncapability_id: c\n---\n"),
+            vec![LegacyTechnologyClassification::Capability]
+        );
+        assert_eq!(
+            classes("---\ntechnology_class: historical-compatibility\n---\n"),
+            vec![LegacyTechnologyClassification::HistoricalCompatibility]
+        );
+    }
+
+    #[test]
+    fn superseded_status_alone_is_not_a_classification() {
+        assert!(classes("---\ntype: technology-node\nstatus: superseded\n---\n").is_empty());
+    }
+
+    #[test]
+    fn empty_or_conflicting_paths_are_not_exactly_one() {
+        assert!(classes("---\nroad_id: \"\"\n---\n").is_empty());
+        assert_eq!(
+            classes("---\nroad_id: r\ntechnology_class: historical-compatibility\n---\n").len(),
+            2
+        );
+    }
 }

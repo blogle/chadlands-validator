@@ -19,8 +19,10 @@ fn write_note(root: &Path, rel: &str, content: &str) {
 fn mini_config() -> Config {
     let mut c = Config::default();
     // Suppress the boundary-missing WARN so tests focus on the rule under test.
-    c.severity_overrides
-        .insert("CHAD-STATE-001".into(), chadlands_validator::findings::Severity::Info);
+    c.severity_overrides.insert(
+        "CHAD-STATE-001".into(),
+        chadlands_validator::findings::Severity::Info,
+    );
     c
 }
 
@@ -400,12 +402,7 @@ fn prot_001_changed_collector_path() {
         "---\ntype: person\nstatus: active\nretrieval_tier: canonical\n---\n# Foo\n",
     );
     let cfg = mini_config();
-    let outcome = validate(
-        root,
-        &cfg,
-        &["70 Sources/Telegram/foo.md".to_string()],
-    )
-    .unwrap();
+    let outcome = validate(root, &cfg, &["70 Sources/Telegram/foo.md".to_string()]).unwrap();
     assert!(has_rule(&outcome.findings.items, "CHAD-PROT-001"));
 }
 
@@ -475,11 +472,20 @@ fn materiality_seeded_from_source_cursor() {
         "40 Civilization/Projects/Test Project.md",
         "---\ntype: project\nstatus: active\nretrieval_tier: canonical\nsource_cursor: 4526\nreviewed_through_cursor: 4534\nlast_confirmed_year: 37\n---\n# Test Project\n",
     );
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/2026-01-01.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\ndate: 2026-01-01\nfirst: 4600\nlast: 4600\ncount: 1\n---\n\n^telegram--100-4600\n**00:00 UTC** · the_mud_lounge_bot\n\nUnrelated source evidence.\n",
+    );
     let cfg = mini_config();
     let outcome = validate(root, &cfg, &[]).unwrap();
-    // The source_cursor should seed material activity
-    // (verified indirectly through the continuity report)
-    assert!(outcome.continuity_report_markdown.is_some());
+    let report = outcome.continuity_report_markdown.unwrap();
+    let row = report
+        .lines()
+        .find(|line| line.contains("Test Project"))
+        .expect("project should be a resurfacing candidate");
+    assert!(row.contains("cursor 4526"));
+    assert!(!row.contains("| — | no mention"));
 }
 
 #[test]
@@ -597,8 +603,144 @@ fn cursor_002_stale_boundary_remediation() {
         .iter()
         .filter(|f| f.rule == "CHAD-CURSOR-002")
         .collect();
-    assert!(cursor_findings.len() >= 1);
-    assert!(cursor_findings[0].message.contains("State Boundary may be stale"));
+    assert!(!cursor_findings.is_empty());
+    assert!(cursor_findings[0]
+        .message
+        .contains("State Boundary may be stale"));
+    assert!(outcome
+        .report_markdown
+        .contains("reconcile the State Boundary before altering the record"));
+    assert!(!outcome
+        .report_markdown
+        .contains("Correct the cursor value to not exceed"));
+}
+
+#[test]
+fn year_003_stale_boundary_keeps_error_but_avoids_downward_rewrite() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_note(
+        root,
+        "00 System/State Boundary.md",
+        "---\ncurrent_turn: 38\ncurrent_year: 38\nlast_resolved_year: 38\ncurrent_source_cursor: 4664\ncanonical_materialized_cursor: 4534\n---\n# Boundary\n",
+    );
+    write_note(
+        root,
+        "60 Steering/Command Board.md",
+        "---\ntype: runtime-context-pack\nstatus: active\nretrieval_tier: runtime\nyear: 39\nsource_cursor: 4717\n---\n# Command Board\n",
+    );
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/source.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\nfirst: 4741\nlast: 4741\ncount: 1\n---\n\n^telegram--100-4741\n**00:00 UTC** · the_mud_lounge_bot\n\nCollected evidence.\n",
+    );
+
+    let outcome = validate(root, &mini_config(), &[]).unwrap();
+    let finding = outcome
+        .findings
+        .items
+        .iter()
+        .find(|finding| finding.rule == "CHAD-YEAR-003")
+        .expect("future year remains fail-closed");
+    assert_eq!(finding.severity, Severity::Error);
+    assert!(finding.message.contains("boundary may be stale"));
+    assert!(finding.message.contains("before altering the record year"));
+    assert!(!finding.message.contains("must not exceed"));
+    assert!(!outcome.report_markdown.contains("correct year to <= 38"));
+}
+
+#[test]
+fn year_003_beyond_collected_evidence_remains_unsupported() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_note(
+        root,
+        "00 System/State Boundary.md",
+        "---\ncurrent_turn: 38\ncurrent_year: 38\nlast_resolved_year: 38\ncurrent_source_cursor: 4664\ncanonical_materialized_cursor: 4534\n---\n# Boundary\n",
+    );
+    write_note(
+        root,
+        "60 Steering/Unsupported.md",
+        "---\ntype: runtime-context-pack\nstatus: active\nretrieval_tier: runtime\nyear: 39\nsource_cursor: 4800\n---\n# Unsupported\n",
+    );
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/source.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\nfirst: 4741\nlast: 4741\ncount: 1\n---\n\n^telegram--100-4741\n**00:00 UTC** · the_mud_lounge_bot\n\nCollected evidence.\n",
+    );
+
+    let outcome = validate(root, &mini_config(), &[]).unwrap();
+    let finding = outcome
+        .findings
+        .items
+        .iter()
+        .find(|finding| finding.rule == "CHAD-YEAR-003")
+        .unwrap();
+    assert!(finding.message.contains("unsupported"));
+    assert!(finding.message.contains("correct the record"));
+}
+
+#[test]
+fn tech_mig_004_preserves_declared_six_road_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    write_note(
+        root,
+        "40 Civilization/Projects/Portfolio.md",
+        "---\ntype: project\nstatus: active\nretrieval_tier: canonical\nportfolio_id: frontier\nowner: Council\nlifecycle: active\nreviewed_through_cursor: 100\n---\n# Portfolio\n\nThe active six-road technology portfolio declares:\n\n1. Steam;\n2. cold-hardy grain;\n3. sampling and error bands;\n4. irrigation off gorge water;\n5. managed woodland;\n6. warehouse receipts.\n\n## Road Ownership\n\n| Road | Owner |\n|---|---|\n| Irrigation | Keeper |\n",
+    );
+
+    let outcome = validate(root, &mini_config(), &[]).unwrap();
+    let finding = outcome
+        .findings
+        .items
+        .iter()
+        .find(|finding| finding.rule == "TECH-MIG-004")
+        .expect("legacy portfolio debt should remain");
+    for road in [
+        "Steam",
+        "Cold-Hardy Grain",
+        "Sampling & Error Bands",
+        "Irrigation off Gorge Water",
+        "Managed Woodland",
+        "Warehouse Receipts",
+    ] {
+        assert!(finding.message.contains(&format!("- {road}")));
+    }
+    assert!(!finding.message.contains("\n- Irrigation\n"));
+}
+
+#[test]
+fn tech_mig_001_accepts_exactly_one_explicit_classification() {
+    for field in [
+        "portfolio_id: p",
+        "road_id: r",
+        "capability_id: c",
+        "technology_class: historical-compatibility",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        write_note(
+            dir.path(),
+            "40 Civilization/Capabilities/Technology/Nodes/Legacy.md",
+            &format!(
+                "---\ntype: technology-node\nstatus: superseded\nretrieval_tier: canonical\n{field}\n---\n# Legacy\n"
+            ),
+        );
+        let outcome = validate(dir.path(), &mini_config(), &[]).unwrap();
+        assert!(
+            !has_rule(&outcome.findings.items, "TECH-MIG-001"),
+            "{field}"
+        );
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    write_note(
+        dir.path(),
+        "40 Civilization/Capabilities/Technology/Nodes/Legacy.md",
+        "---\ntype: technology-node\nstatus: superseded\nretrieval_tier: canonical\n---\n# Legacy\n",
+    );
+    let outcome = validate(dir.path(), &mini_config(), &[]).unwrap();
+    assert!(has_rule(&outcome.findings.items, "TECH-MIG-001"));
 }
 
 #[test]

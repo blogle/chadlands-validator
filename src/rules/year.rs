@@ -6,6 +6,7 @@
 //! the declared resolved boundary. Future-dated evidence years are
 //! contradictions.
 
+use crate::boundary;
 use crate::findings::Severity;
 use crate::rules::{finding, RuleContext};
 use crate::vault::Note;
@@ -81,7 +82,7 @@ pub fn check(ctx: &RuleContext) -> Vec<crate::findings::Finding> {
                 ),
             ));
         }
-    } else if boundary.last_resolved_year.is_some() && highest.is_none() {
+    } else if let (Some(resolved), None) = (boundary.last_resolved_year, highest) {
         out.push(finding(
             "CHAD-YEAR-001",
             ctx.sev("CHAD-YEAR-001", Severity::Error),
@@ -89,7 +90,7 @@ pub fn check(ctx: &RuleContext) -> Vec<crate::findings::Finding> {
             format!(
                 "last_resolved_year {} is claimed but no Chronicle year records \
                  exist at all. Create Chronicle year records for the resolved range.",
-                boundary.last_resolved_year.unwrap()
+                resolved
             ),
         ));
     }
@@ -154,24 +155,72 @@ pub fn check(ctx: &RuleContext) -> Vec<crate::findings::Finding> {
     }
 
     // CHAD-YEAR-003: future evidence years.
+    // When the record's source cursor is within the direct-source frontier
+    // but ahead of the State Boundary, the boundary may be stale — do NOT
+    // recommend changing the year downward until the boundary is reconciled.
     if let Some(current_year) = boundary.current_year {
+        let max_source = ctx.source_index.and_then(|si| si.max_source_cursor);
+
         for note in &ctx.index.notes {
             if !note.curated || note.parse_error.is_some() {
                 continue;
             }
+            let note_source_cursor = note.fm().get_i64("source_cursor");
+
             for field in EVIDENCE_YEAR_FIELDS {
                 if let Some(v) = note.fm().get_i64(field) {
                     if v > current_year {
-                        out.push(finding(
-                            "CHAD-YEAR-003",
-                            ctx.sev("CHAD-YEAR-003", Severity::Error),
-                            Some(&note.path),
+                        // Diagnose whether the boundary may be stale
+                        let diag = note_source_cursor
+                            .map(|sc| {
+                                boundary::diagnose_cursor(
+                                    sc,
+                                    boundary.current_source_cursor,
+                                    max_source,
+                                )
+                            })
+                            .unwrap_or(boundary::BoundaryDiagnosis::Unknown);
+
+                        let message = if diag.boundary_may_be_stale() {
+                            format!(
+                                "`{field}: {v}` lies in the future (current_year \
+                                 {current_year}), but the record's source evidence \
+                                 (cursor {sc}) is within the collected direct-source \
+                                 frontier and ahead of the State Boundary. The \
+                                 authoritative boundary may be stale. Reconcile \
+                                 the boundary before altering the record year.",
+                                sc = note_source_cursor.unwrap(),
+                            )
+                        } else if diag.beyond_evidence() {
+                            format!(
+                                "`{field}: {v}` lies in the future (current_year \
+                                 {current_year}) and its source evidence cursor \
+                                 {sc} exceeds the collected direct-source frontier \
+                                 ({max_source:?}). The evidence is unsupported; \
+                                 confirm the source and correct the record as needed.",
+                                sc = note_source_cursor.unwrap(),
+                            )
+                        } else if matches!(diag, boundary::BoundaryDiagnosis::Unknown) {
+                            format!(
+                                "`{field}: {v}` lies in the future (current_year \
+                                 {current_year}), but the record's source cursor \
+                                 association or boundary relationship is unknown. \
+                                 Reconcile the source association and authoritative \
+                                 boundary before altering the record year."
+                            )
+                        } else {
                             format!(
                                 "`{field}: {v}` lies in the future (current_year \
                                  {current_year}). Evidence years must not exceed the \
                                  current year. Use target_year or next_review_year \
                                  for future plans."
-                            ),
+                            )
+                        };
+                        out.push(finding(
+                            "CHAD-YEAR-003",
+                            ctx.sev("CHAD-YEAR-003", Severity::Error),
+                            Some(&note.path),
+                            message,
                         ));
                     }
                 }

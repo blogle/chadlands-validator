@@ -90,15 +90,16 @@ pub fn build_inventory(index: &VaultIndex) -> HashMap<String, FieldInventoryEntr
         if let Yaml::Hash(ref hash) = note.frontmatter {
             for (key, _value) in hash {
                 if let Yaml::String(key_str) = key {
-                    let entry = inventory
-                        .entry(key_str.clone())
-                        .or_insert_with(|| FieldInventoryEntry {
-                            field: key_str.clone(),
-                            count: 0,
-                            types: HashSet::new(),
-                            folders: HashSet::new(),
-                            classification: classify_field(key_str),
-                        });
+                    let entry =
+                        inventory
+                            .entry(key_str.clone())
+                            .or_insert_with(|| FieldInventoryEntry {
+                                field: key_str.clone(),
+                                count: 0,
+                                types: HashSet::new(),
+                                folders: HashSet::new(),
+                                classification: classify_field(key_str),
+                            });
                     entry.count += 1;
                     entry.types.insert(type_name.clone());
                     if let Some(folder) = note.path.rsplit_once('/').map(|(f, _)| f.to_string()) {
@@ -116,23 +117,53 @@ pub fn build_inventory(index: &VaultIndex) -> HashMap<String, FieldInventoryEntr
 fn classify_field(field: &str) -> FieldClassification {
     match field {
         // Canonical semantic — must stay
-        "type" | "status" | "lifecycle" | "result" | "canonical_id" | "aliases"
-        | "source_cursor" | "reviewed_through_cursor" | "last_confirmed_year"
-        | "owner" | "lead" | "second" | "custody" | "accepted_year"
-        | "acceptance_cursor" | "started_year" | "started_cursor"
-        | "target_year" | "next_review_year" | "terminal_due_year"
-        | "portfolio_id" | "road_id" | "capability_id" | "produces"
-        | "requires" | "cheapened_by" | "attainment_state" | "depth"
+        "type"
+        | "status"
+        | "lifecycle"
+        | "result"
+        | "canonical_id"
+        | "aliases"
+        | "source_cursor"
+        | "reviewed_through_cursor"
+        | "last_confirmed_year"
+        | "owner"
+        | "lead"
+        | "second"
+        | "custody"
+        | "accepted_year"
+        | "acceptance_cursor"
+        | "started_year"
+        | "started_cursor"
+        | "target_year"
+        | "next_review_year"
+        | "terminal_due_year"
+        | "portfolio_id"
+        | "road_id"
+        | "capability_id"
+        | "technology_class"
+        | "produces"
+        | "requires"
+        | "cheapened_by"
+        | "attainment_state"
+        | "depth"
         | "knowledge_scope" => FieldClassification::CanonicalSemantic,
 
         // Generated/derived — can be removed once SourceIndex proves it
-        "last_mentioned_cursor" | "last_mentioned_turn" | "last_mentioned_year"
-        | "last_material_cursor" | "last_material_turn" | "last_material_year"
-        | "last_evidenced_use_cursor" | "last_evidenced_use_turn"
-        | "last_evidenced_use_year" | "mention_count" | "use_count"
-        | "dormancy_age" | "dormant" | "overdue" | "candidate_score" => {
-            FieldClassification::GeneratedDerived
-        }
+        "last_mentioned_cursor"
+        | "last_mentioned_turn"
+        | "last_mentioned_year"
+        | "last_material_cursor"
+        | "last_material_turn"
+        | "last_material_year"
+        | "last_evidenced_use_cursor"
+        | "last_evidenced_use_turn"
+        | "last_evidenced_use_year"
+        | "mention_count"
+        | "use_count"
+        | "dormancy_age"
+        | "dormant"
+        | "overdue"
+        | "candidate_score" => FieldClassification::GeneratedDerived,
 
         // Path-derivable but consumed by MCP
         "retrieval_tier" => FieldClassification::PathDerivableButConsumed,
@@ -150,18 +181,42 @@ fn classify_field(field: &str) -> FieldClassification {
 /// Returns None if the value is ambiguous.
 fn derive_retrieval_tier(path: &str, type_name: Option<&str>) -> Option<&'static str> {
     // Path-based derivation
-    if path.starts_with("30 World/People/") { return Some("canonical"); }
-    if path.starts_with("30 World/Places/") { return Some("canonical"); }
-    if path.starts_with("30 World/Polities/") { return Some("canonical"); }
-    if path.starts_with("30 World/Phenomena/") { return Some("canonical"); }
-    if path.starts_with("30 World/Registers/") { return Some("evidence"); }
-    if path.starts_with("40 Civilization/Projects/") { return Some("canonical"); }
-    if path.starts_with("40 Civilization/Institutions/") { return Some("canonical"); }
-    if path.starts_with("40 Civilization/Treaties/") { return Some("canonical"); }
-    if path.starts_with("40 Civilization/Standing Documents/") { return Some("canonical"); }
-    if path.starts_with("50 Knowledge/Superseded Beliefs/") { return Some("archive"); }
-    if path.starts_with("50 Knowledge/Strategic Hypotheses/") { return Some("evidence"); }
-    if path.starts_with("50 Knowledge/Investigations/") { return Some("evidence"); }
+    if path.starts_with("30 World/People/") {
+        return Some("canonical");
+    }
+    if path.starts_with("30 World/Places/") {
+        return Some("canonical");
+    }
+    if path.starts_with("30 World/Polities/") {
+        return Some("canonical");
+    }
+    if path.starts_with("30 World/Phenomena/") {
+        return Some("canonical");
+    }
+    if path.starts_with("30 World/Registers/") {
+        return Some("evidence");
+    }
+    if path.starts_with("40 Civilization/Projects/") {
+        return Some("canonical");
+    }
+    if path.starts_with("40 Civilization/Institutions/") {
+        return Some("canonical");
+    }
+    if path.starts_with("40 Civilization/Treaties/") {
+        return Some("canonical");
+    }
+    if path.starts_with("40 Civilization/Standing Documents/") {
+        return Some("canonical");
+    }
+    if path.starts_with("50 Knowledge/Superseded Beliefs/") {
+        return Some("archive");
+    }
+    if path.starts_with("50 Knowledge/Strategic Hypotheses/") {
+        return Some("evidence");
+    }
+    if path.starts_with("50 Knowledge/Investigations/") {
+        return Some("evidence");
+    }
 
     // Type-based derivation for remaining paths
     match type_name? {
@@ -178,11 +233,7 @@ fn derive_retrieval_tier(path: &str, type_name: Option<&str>) -> Option<&'static
 }
 
 /// Build a migration plan: what would change if we applied the rules.
-pub fn plan(
-    index: &VaultIndex,
-    config: &Config,
-    _vault_root: &Path,
-) -> MigrationPlan {
+pub fn plan(index: &VaultIndex, config: &Config, _vault_root: &Path) -> MigrationPlan {
     let mut files = Vec::new();
     let mut total_changes = 0;
     let mut total_files_affected = 0;
@@ -464,8 +515,7 @@ pub fn render_plan(plan: &MigrationPlan) -> String {
     }
 
     // Skipped files
-    let skipped: Vec<&MigrationFileResult> =
-        plan.files.iter().filter(|f| f.skipped).collect();
+    let skipped: Vec<&MigrationFileResult> = plan.files.iter().filter(|f| f.skipped).collect();
     if !skipped.is_empty() {
         out.push_str("\n## Skipped Files\n\n");
         for f in skipped {
@@ -505,7 +555,10 @@ pub fn render_inventory(inventory: &HashMap<String, FieldInventoryEntry>) -> Str
     out.push_str("---\n\n");
 
     out.push_str("# Frontmatter Inventory\n\n");
-    out.push_str(&format!("**{}** distinct fields across the vault.\n\n", inventory.len()));
+    out.push_str(&format!(
+        "**{}** distinct fields across the vault.\n\n",
+        inventory.len()
+    ));
 
     out.push_str("| Field | Count | Types | Classification |\n");
     out.push_str("|---|---:|---|---|\n");
@@ -516,7 +569,11 @@ pub fn render_inventory(inventory: &HashMap<String, FieldInventoryEntry>) -> Str
     for entry in entries {
         let types: Vec<String> = entry.types.iter().take(3).cloned().collect();
         let types_str = if types.len() < entry.types.len() {
-            format!("{} (+{})", types.join(", "), entry.types.len() - types.len())
+            format!(
+                "{} (+{})",
+                types.join(", "),
+                entry.types.len() - types.len()
+            )
         } else {
             types.join(", ")
         };
@@ -544,6 +601,10 @@ mod tests {
             FieldClassification::CanonicalSemantic
         );
         assert_eq!(
+            classify_field("technology_class"),
+            FieldClassification::CanonicalSemantic
+        );
+        assert_eq!(
             classify_field("retrieval_tier"),
             FieldClassification::PathDerivableButConsumed
         );
@@ -555,7 +616,8 @@ mod tests {
 
     #[test]
     fn remove_yaml_field_basic() {
-        let mut raw = "---\ntype: person\nstatus: active\nmention_count: 5\n---\nbody\n".to_string();
+        let mut raw =
+            "---\ntype: person\nstatus: active\nmention_count: 5\n---\nbody\n".to_string();
         assert!(remove_yaml_field(&mut raw, "mention_count"));
         assert!(!raw.contains("mention_count"));
         assert!(raw.contains("type: person"));

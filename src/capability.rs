@@ -182,11 +182,7 @@ fn check_canonical_use(ctx: &RuleContext, cap_id: &str) -> bool {
             continue;
         }
         let fm = note.fm();
-        if fm
-            .get_list("requires")
-            .iter()
-            .any(|r| r.trim() == cap_id)
-        {
+        if fm.get_list("requires").iter().any(|r| r.trim() == cap_id) {
             return true;
         }
         if fm
@@ -196,11 +192,7 @@ fn check_canonical_use(ctx: &RuleContext, cap_id: &str) -> bool {
         {
             return true;
         }
-        if fm
-            .get_list("produces")
-            .iter()
-            .any(|r| r.trim() == cap_id)
-        {
+        if fm.get_list("produces").iter().any(|r| r.trim() == cap_id) {
             return true;
         }
     }
