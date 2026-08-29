@@ -184,6 +184,109 @@ pub fn classify_gaps(
         }
     }
 
+    // 3. Lifecycle events: terminal events create MaterializationGap
+    //    when the canonical state hasn't been updated to reflect them.
+    for event in &source_index.lifecycle_events {
+        if !event.outcome.is_terminal() {
+            continue;
+        }
+        // Find the identity to check canonical state
+        if let Some(identity) = source_index
+            .identities
+            .iter()
+            .find(|id| id.key == event.identity_key)
+        {
+            // If the identity is still active/in-progress, the terminal
+            // event represents a materialization gap
+            let is_active = identity
+                .lifecycle
+                .as_deref()
+                .map(|l| {
+                    l.starts_with("accepted")
+                        || l.starts_with("executing")
+                        || l.starts_with("in-progress")
+                        || l.starts_with("progress")
+                })
+                .unwrap_or(false)
+                || identity
+                    .status
+                    .as_deref()
+                    .map(|s| s == "active")
+                    .unwrap_or(false);
+
+            if is_active {
+                let frontier = source_index.max_source_cursor;
+                let cursor_delta = frontier.map(|f| f - event.cursor);
+
+                gaps.push(GapCandidate {
+                    kind: GapKind::MaterializationGap,
+                    stable_id: Some(event.identity_key.clone()),
+                    title: format!(
+                        "{}: direct source reports {} but canonical state is {}",
+                        identity.title,
+                        event.outcome.label(),
+                        identity
+                            .lifecycle
+                            .as_deref()
+                            .or(identity.status.as_deref())
+                            .unwrap_or("unknown")
+                    ),
+                    record_path: Some(std::path::PathBuf::from(&identity.note_path)),
+                    record_type: Some(identity.type_name.clone()),
+                    canonical_status: identity.status.clone(),
+                    canonical_lifecycle: identity.lifecycle.clone(),
+                    canonical_source_cursor: None,
+                    reviewed_through_cursor: None,
+                    evidence_cursor: Some(event.cursor),
+                    evidence_kind: Some(event.evidence_kind),
+                    evidence_path: Some(event.source_file.clone()),
+                    evidence_line: Some(event.source_line),
+                    current_source_frontier: frontier,
+                    cursor_delta,
+                    reason_code: "LIFECYCLE_EVENT_NEWER_THAN_CANONICAL".to_string(),
+                    recommended_operation: RecommendedOperation::PlayerSideReconciliation,
+                    sort_key: (
+                        GapKind::MaterializationGap.priority_class(),
+                        -cursor_delta.unwrap_or(0),
+                        0,
+                        event.identity_key.clone(),
+                        identity.note_path.clone(),
+                    ),
+                });
+            }
+        }
+    }
+
+    // 4. Suppress AuthorityGap for identities that have a terminal
+    //    lifecycle event — the MaterializationGap takes priority.
+    let lifecycle_identity_keys: std::collections::HashSet<&str> = source_index
+        .lifecycle_events
+        .iter()
+        .filter(|e| e.outcome.is_terminal())
+        .map(|e| e.identity_key.as_str())
+        .collect();
+
+    gaps.retain(|g| {
+        if g.kind == GapKind::AuthorityGap {
+            if let Some(stable_id) = &g.stable_id {
+                return !lifecycle_identity_keys.contains(stable_id.as_str());
+            }
+            // Also check the title (finding message) and record_path
+            // for references to identities with lifecycle events
+            for key in &lifecycle_identity_keys {
+                if g.title.contains(key) {
+                    return false;
+                }
+                if let Some(path) = &g.record_path {
+                    if path.to_string_lossy().contains(key) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    });
+
     // Stable tie-breaking: sort by sort_key
     gaps.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
 

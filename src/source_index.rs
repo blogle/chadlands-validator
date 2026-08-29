@@ -138,6 +138,7 @@ pub struct SourceIndex {
     pub mentions: Vec<Mention>,
     pub cursor_epochs: Vec<CursorEpoch>,
     pub receipts: Vec<ParsedReceipt>,
+    pub lifecycle_events: Vec<crate::lifecycle_events::SourceLifecycleEvent>,
     pub activity: HashMap<String, IdentityActivity>,
     pub candidates: Vec<CoverageCandidate>,
     pub source_files_scanned: usize,
@@ -312,6 +313,9 @@ pub fn build_identity_dict(index: &VaultIndex, config: &Config) -> Vec<KnownIden
             .id_fields
             .iter()
             .find_map(|f| fm.get_str(f))
+            .or_else(|| fm.get_str("road_id"))
+            .or_else(|| fm.get_str("capability_id"))
+            .or_else(|| fm.get_str("portfolio_id"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
@@ -1317,11 +1321,31 @@ pub fn build(
     // 5. Parse receipts
     let receipts = parse_receipts(&messages);
 
+    // 5b. Parse lifecycle events from authoritative DM source
+    let lifecycle_events =
+        crate::lifecycle_events::parse_lifecycle_events(&messages, &identities, config);
+
     // 6. Aggregate activity
     let mut activity = aggregate_activity(&mentions, &receipts, &identities, &messages);
 
     // 6b. Seed material activity from canonical source_cursor
     seed_canonical_materiality(&mut activity, &identities, vault_index);
+
+    // 6c. Lifecycle events advance material cursor (authoritative state changes)
+    for event in &lifecycle_events {
+        let act = activity.entry(event.identity_key.clone()).or_default();
+        match act.last_material_cursor {
+            Some(c) if c >= event.cursor => {}
+            _ => {
+                act.last_material_cursor = Some(event.cursor);
+                act.last_material_source = Some(EvidenceSource {
+                    kind: event.evidence_kind,
+                    path: Some(event.source_file.clone()),
+                    line: Some(event.source_line),
+                });
+            }
+        }
+    }
 
     // 7. Build canonical identity universe (all curated notes with types)
     // This is broader than tracked_types — used for candidate suppression.
@@ -1414,6 +1438,7 @@ pub fn build(
         mentions,
         cursor_epochs,
         receipts,
+        lifecycle_events,
         activity,
         candidates,
         source_files_scanned,

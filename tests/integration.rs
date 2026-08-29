@@ -767,3 +767,149 @@ fn cap_mig_001_detected() {
     let outcome = validate(root, &cfg, &[]).unwrap();
     assert!(has_rule(&outcome.findings.items, "CAP-MIG-001"));
 }
+
+// -----------------------------------------------------------------------
+// Patch 3 — Lifecycle events
+// -----------------------------------------------------------------------
+
+#[test]
+fn universal_formation_materialization_gap() {
+    // §8 / Test 13: Canonical stale active road + direct source CLOSED SUCCEEDED
+    // → MATERIALIZATION_GAP, player-side reconciliation, no DM inquiry
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    // Boundary with current_source_cursor 5100
+    write_note(
+        root,
+        "00 System/State Boundary.md",
+        "---\ntype: state-boundary\ncurrent_turn: 42\ncurrent_year: 42\nlast_resolved_year: 41\ncurrent_source_cursor: 5100\ncanonical_materialized_cursor: 4838\n---\n# State Boundary\n",
+    );
+    // Canonical road: active, in-progress, reviewed through 4838
+    write_note(
+        root,
+        "40 Civilization/Technology/Roads/Universal Formation.md",
+        "---\ntype: technology-road\nroad_id: road:universal-formation\nstatus: active\nlifecycle: in-progress\naccepted_year: 37\nacceptance_cursor: 4524\nsource_cursor: 4526\nreviewed_through_cursor: 4838\nterminal_due_year: 40\n---\n# Universal Formation\n",
+    );
+    // DM source at cursor 5035: lifecycle event CLOSED SUCCEEDED
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/2026-01-01.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\ndate: 2026-01-01\nfirst: 5035\nlast: 5035\ncount: 1\n---\n\n^telegram--100-5035\n**00:00 UTC** · the_mud_lounge_bot\n\nUniversal formation road | closed SUCCEEDED this year\n",
+    );
+
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+
+    // Lifecycle event should be parsed
+    let source_idx = outcome
+        .continuity_report_markdown
+        .as_ref()
+        .map(|_| {
+            // Verify via the report content
+            let report = outcome.continuity_report_markdown.as_ref().unwrap();
+            report.contains("lifecycle events parsed: 1")
+        })
+        .unwrap_or(false);
+    assert!(source_idx, "should parse 1 lifecycle event");
+
+    // The gap classification should produce a MATERIALIZATION_GAP
+    let report = outcome.continuity_report_markdown.as_ref().unwrap();
+    assert!(
+        report.contains("MATERIALIZATION_GAP"),
+        "should classify as MATERIALIZATION_GAP"
+    );
+    assert!(
+        report.contains("PLAYER_SIDE_RECONCILIATION"),
+        "should recommend player-side reconciliation"
+    );
+    // Must NOT recommend DM inquiry (direct evidence already answers)
+    let queue_section = report
+        .split("## Top Actionable Reconciliation Queue")
+        .nth(1)
+        .unwrap_or("");
+    // DM_INQUIRY should not appear for this specific gap
+    assert!(
+        !queue_section.contains("road:universal-formation")
+            || !queue_section.contains("DM_INQUIRY"),
+        "must not recommend DM inquiry when direct evidence exists"
+    );
+}
+
+#[test]
+fn steam_governor_not_terminal_failure() {
+    // §7.5 / Test 14: Steam's governor control FAILED TERMINALLY
+    // → NO terminal-failure event for road:steam
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    write_note(
+        root,
+        "00 System/State Boundary.md",
+        "---\ntype: state-boundary\ncurrent_turn: 42\ncurrent_year: 42\nlast_resolved_year: 41\ncurrent_source_cursor: 5100\ncanonical_materialized_cursor: 4838\n---\n# State Boundary\n",
+    );
+    write_note(
+        root,
+        "40 Civilization/Technology/Roads/Steam.md",
+        "---\ntype: technology-road\nroad_id: road:steam\nstatus: active\nlifecycle: in-progress\naccepted_year: 35\nacceptance_cursor: 4200\nsource_cursor: 4300\nreviewed_through_cursor: 4838\n---\n# Steam\n",
+    );
+    // DM source: Steam's governor control FAILED TERMINALLY
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/2026-01-01.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\ndate: 2026-01-01\nfirst: 5050\nlast: 5050\ncount: 1\n---\n\n^telegram--100-5050\n**00:00 UTC** · the_mud_lounge_bot\n\nSteam's governor control FAILED TERMINALLY ... bearing and shaft tolerance continues\n",
+    );
+
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+
+    // Should produce 0 lifecycle events (component subject guard)
+    let report = outcome.continuity_report_markdown.as_ref().unwrap();
+    assert!(
+        report.contains("lifecycle events parsed: 0"),
+        "should produce 0 lifecycle events (component subject guard)"
+    );
+    // road:steam should NOT appear as a MATERIALIZATION_GAP
+    assert!(
+        !report.contains("road:steam") || !report.contains("MATERIALIZATION_GAP"),
+        "road:steam must not be classified as terminally failed"
+    );
+}
+
+#[test]
+fn contradictory_source_events() {
+    // §9 / Test 7: Two incompatible terminal events for same identity
+    // → CONTRADICTION
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+
+    write_note(
+        root,
+        "00 System/State Boundary.md",
+        "---\ntype: state-boundary\ncurrent_turn: 42\ncurrent_year: 42\nlast_resolved_year: 41\ncurrent_source_cursor: 5200\ncanonical_materialized_cursor: 4838\n---\n# State Boundary\n",
+    );
+    write_note(
+        root,
+        "40 Civilization/Technology/Roads/Test Road.md",
+        "---\ntype: technology-road\nroad_id: road:test-road\nstatus: active\nlifecycle: in-progress\naccepted_year: 38\nacceptance_cursor: 4600\nsource_cursor: 4650\nreviewed_through_cursor: 4838\n---\n# Test Road\n",
+    );
+    // Two DM messages with contradictory terminal outcomes
+    write_note(
+        root,
+        "70 Sources/Telegram/Player/2026/2026-01-01.md",
+        "---\ntype: telegram-chat-part\nsource: telegram\nstream: player\ndate: 2026-01-01\nfirst: 5000\nlast: 5001\ncount: 2\n---\n\n^telegram--100-5000\n**00:00 UTC** · the_mud_lounge_bot\n\nTest road | closed SUCCEEDED this year\n\n^telegram--100-5001\n**00:01 UTC** · the_mud_lounge_bot\n\nTest road | FAILED at final review\n",
+    );
+
+    let cfg = mini_config();
+    let outcome = validate(root, &cfg, &[]).unwrap();
+
+    let report = outcome.continuity_report_markdown.as_ref().unwrap();
+    // Should detect 2 lifecycle events
+    assert!(
+        report.contains("lifecycle events parsed: 2"),
+        "should parse 2 lifecycle events"
+    );
+    // Contradiction detection happens in lifecycle_events module
+    // The events themselves create MaterializationGap entries since the
+    // road is still active. Contradiction detection is tested at unit level.
+}

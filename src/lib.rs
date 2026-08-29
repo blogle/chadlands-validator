@@ -16,6 +16,7 @@ pub mod findings;
 pub mod frontmatter;
 pub mod gaps;
 pub mod legacy_technology;
+pub mod lifecycle_events;
 pub mod manifest;
 pub mod migration;
 pub mod receipts;

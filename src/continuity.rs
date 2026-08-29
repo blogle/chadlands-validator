@@ -732,8 +732,12 @@ fn render_metrics(out: &mut String, source_index: &SourceIndex) {
         source_index.mentions.len()
     ));
     out.push_str(&format!(
-        "- receipts parsed: {}\n",
+        "- structured receipts parsed: {}\n",
         source_index.receipts.len()
+    ));
+    out.push_str(&format!(
+        "- exact lifecycle events parsed: {}\n",
+        source_index.lifecycle_events.len()
     ));
     out.push_str(&format!(
         "- unresolved candidates: {}\n",
