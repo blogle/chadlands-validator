@@ -8,6 +8,8 @@ use std::collections::HashSet;
 
 use crate::boundary::{diagnose_source_frontiers, SourceFrontierRelationship, StateBoundary};
 use crate::config::Config;
+use crate::findings::Findings;
+use crate::gaps;
 use crate::source_index::{resolve_cursor, SourceIndex};
 use crate::vault::VaultIndex;
 
@@ -17,6 +19,7 @@ pub fn render(
     source_index: &SourceIndex,
     config: &Config,
     vault_index: &VaultIndex,
+    findings: &Findings,
 ) -> String {
     let mut out = String::new();
 
@@ -46,13 +49,17 @@ pub fn render(
     // Technology Monitoring Coverage (denominators)
     render_technology_coverage(&mut out, source_index, config);
 
+    // Top Actionable Reconciliation Queue
+    let classified = gaps::classify_gaps(findings, source_index, boundary);
+    render_actionable_queue(&mut out, &classified, config);
+
     // Resurfacing Candidates
     render_resurfacing(&mut out, source_index, config, vault_index);
 
     // Owed Technology Receipts
     render_receipts(&mut out, source_index, config);
 
-    // Dormant Attained Capabilities
+    // Capabilities With No Machine-Linked Downstream Use Evidence
     render_capabilities(&mut out, source_index, config);
 
     // Coverage Candidates
@@ -134,6 +141,61 @@ fn render_boundary(
         SourceFrontierRelationship::Unknown => "UNKNOWN",
     };
     out.push_str(&format!("- boundary relationship: {relationship}\n"));
+
+    out.push('\n');
+}
+
+fn render_actionable_queue(out: &mut String, classified: &[gaps::GapCandidate], _config: &Config) {
+    let queue = gaps::bounded_queue(classified, 8, 4);
+
+    out.push_str("## Top Actionable Reconciliation Queue\n\n");
+
+    if classified.is_empty() {
+        out.push_str("No classified gaps.\n\n");
+        return;
+    }
+
+    // Summary counts
+    out.push_str("**Gap summary:**\n");
+    for (kind, count) in &queue.counts {
+        out.push_str(&format!("- {kind}: {count}\n"));
+    }
+    out.push_str(&format!("- total: {}\n\n", queue.total));
+
+    if queue.queue.is_empty() {
+        out.push_str("No actionable items in bounded queue.\n\n");
+        return;
+    }
+
+    out.push_str(&format!(
+        "Showing {} of {} actionable items (8 strict-priority + 4 fairness slots):\n\n",
+        queue.shown, queue.total,
+    ));
+
+    out.push_str(
+        "| # | Class | Item | Canonical Cursor | Evidence Cursor | Delta | Reason | Operation |\n",
+    );
+    out.push_str("|---|---|---|---:|---:|---:|---|---|\n");
+
+    for (i, g) in queue.queue.iter().enumerate() {
+        let path_display = g
+            .record_path
+            .as_ref()
+            .map(|p| format!("`{}`", p.display()))
+            .unwrap_or_else(|| "—".to_string());
+        out.push_str(&format!(
+            "| {} | {} | {} — {} | {} | {} | {} | {} | {} |\n",
+            i + 1,
+            g.kind.label(),
+            g.title.chars().take(60).collect::<String>(),
+            path_display,
+            opt_i64(g.canonical_source_cursor),
+            opt_i64(g.evidence_cursor),
+            opt_i64(g.cursor_delta),
+            g.reason_code,
+            g.recommended_operation.label(),
+        ));
+    }
 
     out.push('\n');
 }

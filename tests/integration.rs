@@ -480,7 +480,12 @@ fn materiality_seeded_from_source_cursor() {
     let cfg = mini_config();
     let outcome = validate(root, &cfg, &[]).unwrap();
     let report = outcome.continuity_report_markdown.unwrap();
-    let row = report
+    // Find the resurfacing queue section and look for the project row there
+    let resurfacing_section = report
+        .split("## Play / Research Resurfacing Queue")
+        .nth(1)
+        .expect("resurfacing section should exist");
+    let row = resurfacing_section
         .lines()
         .find(|line| line.contains("Test Project"))
         .expect("project should be a resurfacing candidate");
@@ -509,7 +514,12 @@ fn canonical_identity_suppresses_coverage_candidate() {
     // Forge School should NOT be a coverage candidate
     // because it's in the canonical identity universe
     let report = outcome.continuity_report_markdown.unwrap();
-    assert!(!report.contains("Forge School"));
+    // Check the Coverage Candidates section specifically
+    let coverage_section = report.split("## Coverage Candidates").nth(1).unwrap_or("");
+    assert!(
+        !coverage_section.contains("Forge School"),
+        "Forge School should not appear in Coverage Candidates section"
+    );
 }
 
 #[test]
