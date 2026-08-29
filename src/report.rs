@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 
 use crate::boundary::StateBoundary;
 use crate::config::Config;
+use crate::domain;
 use crate::findings::{Finding, Findings, Severity};
 use crate::rules::meta;
 
@@ -366,6 +367,7 @@ pub fn render(
     boundary: &StateBoundary,
     findings: &Findings,
     files_checked: usize,
+    index: &crate::vault::VaultIndex,
     config: &Config,
     config_path: Option<&str>,
     previous: Option<&PreviousReport>,
@@ -467,6 +469,15 @@ pub fn render(
     out.push_str(&format!("errors: {}\n", findings.errors()));
     out.push_str(&format!("warnings: {}\n", findings.warnings()));
     out.push_str(&format!("infos: {}\n", findings.infos()));
+    let entity_summary = domain::count_entities(index, config);
+    out.push_str(&format!(
+        "modern_entities: {}\n",
+        entity_summary.modern_entity_count
+    ));
+    out.push_str(&format!(
+        "legacy_entities: {}\n",
+        entity_summary.legacy_entity_count
+    ));
     let delta_status = match delta_basis {
         DeltaBasis::NoPreviousReport => "no-previous-report",
         DeltaBasis::NotComparable => "not-comparable",

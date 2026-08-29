@@ -120,4 +120,22 @@ impl Findings {
             .filter(|f| f.severity == Severity::Info)
             .count()
     }
+
+    pub fn has_errors(&self) -> bool {
+        self.items.iter().any(|f| f.severity == Severity::Error)
+    }
+
+    pub fn contains_rule(&self, rule: &str) -> bool {
+        self.items.iter().any(|f| f.rule == rule)
+    }
+
+    pub fn count_rule(&self, rule: &str) -> usize {
+        self.items.iter().filter(|f| f.rule == rule).count()
+    }
+
+    pub fn path_has_rule(&self, path: &str, rule: &str) -> bool {
+        self.items
+            .iter()
+            .any(|f| f.rule == rule && f.path.as_deref() == Some(path))
+    }
 }

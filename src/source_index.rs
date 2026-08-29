@@ -38,6 +38,29 @@ pub enum SpeakerClass {
     Unknown,
 }
 
+/// Provenance of an activity evidence cursor. Each variant records how
+/// the cursor was established so that downstream consumers can distinguish
+/// material evidence from mere mention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ActivityEvidenceKind {
+    /// Canonical `source_cursor` on a vault record.
+    CanonicalSourceCursor,
+    /// Exact identity title or alias matched in source text.
+    ExactIdentityMention,
+    /// Structured `[CL ...]` receipt recognized in source.
+    StructuredReceipt,
+    /// Lifecycle event recognized from direct source (Patch 3+).
+    ExactLifecycleSourceEvent,
+}
+
+/// Where an activity evidence cursor was observed.
+#[derive(Debug, Clone)]
+pub struct EvidenceSource {
+    pub kind: ActivityEvidenceKind,
+    pub path: Option<String>,
+    pub line: Option<usize>,
+}
+
 /// A known identity extracted from canonical records.
 #[derive(Debug, Clone)]
 pub struct KnownIdentity {
@@ -90,6 +113,12 @@ pub struct IdentityActivity {
     pub distinct_message_count: usize,
     pub last_material_cursor: Option<i64>,
     pub last_evidenced_use_cursor: Option<i64>,
+    /// Provenance of `last_mentioned_cursor`.
+    pub last_mentioned_source: Option<EvidenceSource>,
+    /// Provenance of `last_material_cursor`.
+    pub last_material_source: Option<EvidenceSource>,
+    /// Provenance of `last_evidenced_use_cursor`.
+    pub last_evidenced_use_source: Option<EvidenceSource>,
 }
 
 /// Coverage candidate: an unresolved proper-name or ID-like pattern.
@@ -681,6 +710,7 @@ pub fn aggregate_activity(
     mentions: &[Mention],
     receipts: &[ParsedReceipt],
     identities: &[KnownIdentity],
+    messages: &[SourceMessage],
 ) -> HashMap<String, IdentityActivity> {
     let mut activity: HashMap<String, IdentityActivity> = HashMap::new();
 
@@ -699,6 +729,14 @@ pub fn aggregate_activity(
             _ => {
                 act.last_mentioned_cursor = Some(m.cursor);
                 act.last_mentioned_message_index = Some(m.message_index);
+                // Record provenance from the source message
+                if let Some(msg) = messages.get(m.message_index) {
+                    act.last_mentioned_source = Some(EvidenceSource {
+                        kind: ActivityEvidenceKind::ExactIdentityMention,
+                        path: Some(msg.file.clone()),
+                        line: Some(msg.line),
+                    });
+                }
             }
         }
         let seen = seen_per_identity.entry(m.identity_key.clone()).or_default();
@@ -721,6 +759,11 @@ pub fn aggregate_activity(
                         Some(c) if c >= receipt.cursor => {}
                         _ => {
                             act.last_evidenced_use_cursor = Some(receipt.cursor);
+                            act.last_evidenced_use_source = Some(EvidenceSource {
+                                kind: ActivityEvidenceKind::StructuredReceipt,
+                                path: Some(receipt.source_file.clone()),
+                                line: Some(receipt.line),
+                            });
                         }
                     }
                 }
@@ -736,6 +779,11 @@ pub fn aggregate_activity(
                         Some(c) if c >= receipt.cursor => {}
                         _ => {
                             act.last_material_cursor = Some(receipt.cursor);
+                            act.last_material_source = Some(EvidenceSource {
+                                kind: ActivityEvidenceKind::StructuredReceipt,
+                                path: Some(receipt.source_file.clone()),
+                                line: Some(receipt.line),
+                            });
                         }
                     }
                 }
@@ -766,6 +814,11 @@ pub fn seed_canonical_materiality(
                     Some(c) if c >= source_cursor => {}
                     _ => {
                         act.last_material_cursor = Some(source_cursor);
+                        act.last_material_source = Some(EvidenceSource {
+                            kind: ActivityEvidenceKind::CanonicalSourceCursor,
+                            path: Some(note.path.clone()),
+                            line: None,
+                        });
                     }
                 }
             }
@@ -1265,7 +1318,7 @@ pub fn build(
     let receipts = parse_receipts(&messages);
 
     // 6. Aggregate activity
-    let mut activity = aggregate_activity(&mentions, &receipts, &identities);
+    let mut activity = aggregate_activity(&mentions, &receipts, &identities, &messages);
 
     // 6b. Seed material activity from canonical source_cursor
     seed_canonical_materiality(&mut activity, &identities, vault_index);
@@ -1299,35 +1352,13 @@ pub fn build(
     );
 
     // 9. Count technology objects from vault index
-    let mut portfolio_count = 0usize;
-    let mut road_count = 0usize;
-    let mut capability_count = 0usize;
-    let mut legacy_node_count = 0usize;
+    let entity_summary = crate::domain::count_entities(vault_index, config);
+    let portfolio_count = entity_summary.modern_portfolio_count;
+    let road_count = entity_summary.modern_road_count;
+    let capability_count = entity_summary.modern_capability_count;
+    let legacy_node_count = entity_summary.legacy_entity_count;
     let mut active_legacy_portfolio_count = 0usize;
     let mut declared_child_road_count = 0usize;
-
-    for note in &vault_index.notes {
-        if !note.curated || note.parse_error.is_some() {
-            continue;
-        }
-        let type_name = note.type_str().unwrap_or_default();
-        if config.portfolio_types.contains(&type_name) {
-            portfolio_count += 1;
-        }
-        if config.road_types.contains(&type_name) {
-            road_count += 1;
-        }
-        if config.capability_types.contains(&type_name) {
-            capability_count += 1;
-        }
-        if config
-            .legacy_technology_types
-            .iter()
-            .any(|t| t == &type_name)
-        {
-            legacy_node_count += 1;
-        }
-    }
 
     // 10. Compute direct-source frontier metrics
     let max_source_cursor = messages.iter().map(|m| m.cursor).max();
@@ -1338,8 +1369,11 @@ pub fn build(
         if !note.curated || note.parse_error.is_some() {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
-        if type_name != "project" && type_name != "venture" {
+        let kind = crate::domain::kind_for_note(note, config);
+        if !matches!(
+            kind,
+            crate::domain::EntityKind::Project | crate::domain::EntityKind::Venture
+        ) {
             continue;
         }
         let status = note.status().unwrap_or_default();
@@ -1906,7 +1940,7 @@ Second message.
             line: 1,
         }];
         let receipts = parse_receipts(&messages);
-        let mut activity = aggregate_activity(&[], &receipts, &identities);
+        let mut activity = aggregate_activity(&[], &receipts, &identities, &messages);
         let fm = parse(
             "---\ntype: road\nsource_cursor: 4526\nreviewed_through_cursor: 4534\n---\n# Road\n",
         );

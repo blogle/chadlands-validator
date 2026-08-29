@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::domain;
 use crate::findings::Finding;
 use crate::rules::{finding, RuleContext};
 use crate::vault::Note;
@@ -203,39 +204,17 @@ fn check_terminal_results(ctx: &RuleContext, out: &mut Vec<Finding>) {
 // ---------------------------------------------------------------------------
 
 fn check_capability_receipts(ctx: &RuleContext, out: &mut Vec<Finding>) {
-    // Collect all known capability IDs
-    let capability_ids: HashSet<String> = ctx
-        .index
-        .notes
-        .iter()
-        .filter(|n| {
-            n.curated
-                && n.parse_error.is_none()
-                && ctx
-                    .config
-                    .capability_types
-                    .iter()
-                    .any(|t| n.type_str().as_deref() == Some(t.as_str()))
-        })
-        .filter_map(|n| {
-            n.fm()
-                .get_str("capability_id")
-                .map(|s| s.trim().to_string())
-        })
-        .collect();
+    let capability_ids = domain::canonical_capability_ids(ctx.index, ctx.config);
 
-    // Check roads that declare produces
     for note in &ctx.index.notes {
         if !note.curated || note.parse_error.is_some() {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
-        if !ctx.config.road_types.contains(&type_name) {
+        if domain::kind_for_note(note, ctx.config) != domain::EntityKind::Road {
             continue;
         }
         let fm = note.fm();
-        let produces = fm.get_list("produces");
-        for cap_id in produces {
+        for cap_id in fm.get_list("produces") {
             let clean = cap_id.trim();
             if clean.is_empty() {
                 continue;
@@ -261,8 +240,46 @@ fn check_capability_receipts(ctx: &RuleContext, out: &mut Vec<Finding>) {
 // CHAD-TECH-007: road/capability relationship consistency
 // ---------------------------------------------------------------------------
 
-fn check_relationship_consistency(_ctx: &RuleContext, _note: &Note, _out: &mut Vec<Finding>) {
-    // Placeholder for future relationship consistency checks
+fn check_relationship_consistency(ctx: &RuleContext, note: &Note, out: &mut Vec<Finding>) {
+    let road_ids = domain::canonical_road_ids(ctx.index, ctx.config);
+    let portfolio_ids = domain::canonical_portfolio_ids(ctx.index, ctx.config);
+    let fm = note.fm();
+
+    if let Some(portfolio_id) = fm.get_str("portfolio_id") {
+        if !portfolio_ids.contains(&portfolio_id) {
+            out.push(finding(
+                "CHAD-TECH-007",
+                ctx.sev("CHAD-TECH-007", crate::findings::Severity::Error),
+                Some(&note.path),
+                format!(
+                    "`portfolio_id` references `{portfolio_id}` but no \
+                     portfolio record with that ID exists. Create the \
+                     portfolio record or correct the reference.",
+                ),
+            ));
+        }
+    }
+
+    for field in &["road_id", "produced_by_road_ids"] {
+        for value in fm.get_list(field) {
+            let clean = value.trim();
+            if clean.is_empty() {
+                continue;
+            }
+            if !road_ids.contains(clean) {
+                out.push(finding(
+                    "CHAD-TECH-007",
+                    ctx.sev("CHAD-TECH-007", crate::findings::Severity::Error),
+                    Some(&note.path),
+                    format!(
+                        "`{field}` references `{clean}` but no road record \
+                         with that road_id exists. Create the road record or \
+                         correct the reference.",
+                    ),
+                ));
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -324,46 +341,27 @@ fn check_portfolio_children(ctx: &RuleContext, out: &mut Vec<Finding>) {
 // ---------------------------------------------------------------------------
 
 fn check_relationships(ctx: &RuleContext, out: &mut Vec<Finding>) {
-    // Collect all known capability IDs
-    let capability_ids: HashSet<String> = ctx
-        .index
-        .notes
-        .iter()
-        .filter(|n| {
-            n.curated
-                && n.parse_error.is_none()
-                && ctx
-                    .config
-                    .capability_types
-                    .iter()
-                    .any(|t| n.type_str().as_deref() == Some(t.as_str()))
-        })
-        .filter_map(|n| {
-            n.fm()
-                .get_str("capability_id")
-                .map(|s| s.trim().to_string())
-        })
-        .collect();
+    let capability_ids = domain::canonical_capability_ids(ctx.index, ctx.config);
 
     for note in &ctx.index.notes {
         if !note.curated || note.parse_error.is_some() {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
-        let is_tech = ctx.config.road_types.contains(&type_name)
-            || ctx.config.capability_types.contains(&type_name);
-        if !is_tech {
+        let kind = domain::kind_for_note(note, ctx.config);
+        if !matches!(
+            kind,
+            domain::EntityKind::Road | domain::EntityKind::Capability
+        ) {
             continue;
         }
         let fm = note.fm();
         for field in &["requires", "cheapened_by", "produces"] {
-            let refs = fm.get_list(field);
-            for r in refs {
+            for r in fm.get_list(field) {
                 let clean = r.trim();
                 if clean.is_empty() {
                     continue;
                 }
-                if clean.starts_with("CAP-") && !capability_ids.contains(clean) {
+                if !capability_ids.contains(clean) {
                     out.push(finding(
                         "CHAD-TECH-009",
                         ctx.sev("CHAD-TECH-009", crate::findings::Severity::Error),
@@ -390,16 +388,18 @@ fn check_attained_capabilities(ctx: &RuleContext, out: &mut Vec<Finding>) {
         if !note.curated || note.parse_error.is_some() {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
-        if !ctx.config.capability_types.contains(&type_name) {
+        if domain::kind_for_note(note, ctx.config) != domain::EntityKind::Capability {
             continue;
         }
+        let lifecycle = note.fm().get_str("lifecycle").unwrap_or_default();
+        let lower = lifecycle.to_ascii_lowercase();
+        let is_attained =
+            lower.starts_with("attained") || lower == "reproduced" || lower == "diffused";
+        if !is_attained {
+            continue;
+        }
+
         let fm = note.fm();
-        let attainment = fm.get_str("attainment_state").unwrap_or_default();
-        if attainment != "attained" && attainment != "reproduced" && attainment != "diffused" {
-            continue;
-        }
-        // Attained capabilities should have depth and custody
         let has_depth = fm.get_str("depth").is_some();
         let has_custody = fm.get_str("custody").is_some();
         let has_owner = fm.get_str("owner").is_some() || fm.get_str("lead").is_some();
@@ -497,117 +497,81 @@ fn check_legacy_compatibility(ctx: &RuleContext, out: &mut Vec<Finding>) {
 /// or have portfolio-like frontmatter (road_ids, portfolio_id) but are
 /// not typed as technology-portfolio.
 fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
-    // Count machine-readable technology objects
-    let mut portfolio_count = 0usize;
-    let mut road_count = 0usize;
-    let mut _capability_count = 0usize;
-    let mut legacy_node_count = 0usize;
+    let modern = domain::count_entities(ctx.index, ctx.config);
 
     for note in &ctx.index.notes {
         if !note.curated || note.parse_error.is_some() {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
-        if ctx.config.portfolio_types.contains(&type_name) {
-            portfolio_count += 1;
-        }
-        if ctx.config.road_types.contains(&type_name) {
-            road_count += 1;
-        }
-        if ctx.config.capability_types.contains(&type_name) {
-            _capability_count += 1;
-        }
-        if ctx
-            .config
-            .legacy_technology_types
-            .iter()
-            .any(|t| t == &type_name)
-        {
-            legacy_node_count += 1;
-        }
-    }
-
-    // Look for active projects that reference technology/road/portfolio
-    // semantics in their body but are not machine-readable portfolios.
-    for note in &ctx.index.notes {
-        if !note.curated || note.parse_error.is_some() {
+        let kind = domain::kind_for_note(note, ctx.config);
+        let execution = domain::execution_state_for_note(note);
+        if !matches!(
+            kind,
+            domain::EntityKind::Project | domain::EntityKind::Venture
+        ) {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
-        // Only check project/venture types
-        if type_name != "project" && type_name != "venture" {
-            continue;
-        }
-        // Skip if already typed as a technology type
-        if ctx.config.portfolio_types.contains(&type_name)
-            || ctx.config.road_types.contains(&type_name)
-        {
-            continue;
-        }
-        let status = note.status().unwrap_or_default();
-        if status == "completed"
-            || status == "closed"
-            || status == "superseded"
-            || status == "failed"
-        {
+        if domain::execution_state_for_kind(kind, execution) == domain::ExecutionState::Terminal {
             continue;
         }
 
         let fm = note.fm();
-        // Check for portfolio signals in frontmatter
         let has_portfolio_id = fm.get_str("portfolio_id").is_some();
         let has_road_ids = !fm.get_list("road_ids").is_empty();
-
-        // Check body for strong portfolio signals
         let body_lower = note.body.to_ascii_lowercase();
         let has_portfolio_language = body_lower.contains("portfolio")
             && (body_lower.contains("road") || body_lower.contains("technology"));
         let has_road_list = body_lower.contains("road ownership")
             || body_lower.contains("road_ids")
-            || (body_lower.contains("six-road") || body_lower.contains("6-road"));
+            || body_lower.contains("six-road")
+            || body_lower.contains("6-road");
 
-        if has_portfolio_id || has_road_ids || (has_portfolio_language && has_road_list) {
-            // This is a legacy technology-bearing portfolio
-            if road_count == 0 {
-                let declared_roads =
-                    crate::legacy_technology::extract_roads(&note.body, &fm.get_list("road_ids"));
-                let road_list = if declared_roads.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\n\nDeclared child roads:\n{}",
-                        declared_roads
-                            .iter()
-                            .map(|road| format!("- {}", road.name))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    )
-                };
-                out.push(finding(
-                    "TECH-MIG-004",
-                    ctx.sev("TECH-MIG-004", crate::findings::Severity::Warn),
-                    Some(&note.path),
-                    format!(
-                        "active legacy technology-bearing portfolio `{}` \
-                         declares {} child road(s) but resolves 0 \
-                         machine-readable technology-road owners. \
-                         Create durable technology-road records to enable \
-                         road-level validation.{road_list}",
-                        note.title(),
-                        declared_roads.len(),
-                    ),
-                ));
-            }
+        if (has_portfolio_id || has_road_ids || (has_portfolio_language && has_road_list))
+            && modern.modern_road_count == 0
+        {
+            let declared_roads =
+                crate::legacy_technology::extract_roads(&note.body, &fm.get_list("road_ids"));
+            let road_list = if declared_roads.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\nDeclared child roads:\n{}",
+                    declared_roads
+                        .iter()
+                        .map(|road| format!("- {}", road.name))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            out.push(finding(
+                "TECH-MIG-004",
+                ctx.sev("TECH-MIG-004", crate::findings::Severity::Warn),
+                Some(&note.path),
+                format!(
+                    "active legacy technology-bearing portfolio `{}` \
+                     declares {} child road(s) but resolves 0 \
+                     machine-readable technology-road owners. \
+                     Create durable technology-road records to enable \
+                     road-level validation.{road_list}",
+                    note.title(),
+                    declared_roads.len(),
+                ),
+            ));
         }
     }
 
-    // TECH-MIG-006: technology receipt/lifecycle monitoring coverage is
-    // incomplete because active technology remains behind legacy representation.
-    if road_count == 0 && (portfolio_count > 0 || legacy_node_count > 0) {
-        // We have legacy technology objects but no machine-readable roads
-        // This means receipt monitoring is incomplete
-        // This is reported via the continuity report denominators,
-        // not as a separate finding.
+    if modern.legacy_entity_count > 0 {
+        out.push(finding(
+            "TECH-MIG-006",
+            ctx.sev("TECH-MIG-006", crate::findings::Severity::Warn),
+            None,
+            format!(
+                "legacy technology representation is not ratcheted to zero: \
+                 {} legacy record(s) remain. Replace or migrate each legacy \
+                 node to a modern portfolio, road, or capability record.",
+                modern.legacy_entity_count,
+            ),
+        ));
     }
 }
 
@@ -664,52 +628,35 @@ fn legacy_classifications(
 /// Detect when a canonical attained-capability inventory exists but lacks
 /// machine-readable durable capability owners.
 fn check_capability_migration(ctx: &RuleContext, out: &mut Vec<Finding>) {
-    // Count machine-readable capabilities
-    let capability_count: usize = ctx
-        .index
-        .notes
-        .iter()
-        .filter(|n| {
-            n.curated
-                && n.parse_error.is_none()
-                && ctx
-                    .config
-                    .capability_types
-                    .iter()
-                    .any(|t| n.type_str().as_deref() == Some(t.as_str()))
-        })
-        .count();
+    let capability_ids = domain::canonical_capability_ids(ctx.index, ctx.config);
 
-    if capability_count > 0 {
-        return; // Machine-readable capabilities exist
-    }
-
-    // Look for canonical capability registers/inventories
     for note in &ctx.index.notes {
         if !note.curated || note.parse_error.is_some() {
             continue;
         }
-        let type_name = note.type_str().unwrap_or_default();
+        let kind = domain::kind_for_note(note, ctx.config);
+        if !matches!(
+            kind,
+            domain::EntityKind::Register | domain::EntityKind::Index
+        ) {
+            continue;
+        }
         let title_lower = note.title().to_ascii_lowercase();
-
-        // Check if this is a capability register/inventory
-        let is_capability_register = (type_name == "register" || type_name == "index")
-            && (title_lower.contains("capability")
-                || title_lower.contains("attained")
-                || title_lower.contains("technology"));
+        let is_capability_register = title_lower.contains("capability")
+            || title_lower.contains("attained")
+            || title_lower.contains("technology");
 
         if !is_capability_register {
             continue;
         }
 
-        // Check if it contains attained capability entries
         let body_lower = note.body.to_ascii_lowercase();
         let has_attained_entries = body_lower.contains("attained")
             || body_lower.contains("capability")
             || body_lower.contains("water power")
             || body_lower.contains("precision gauge");
 
-        if has_attained_entries {
+        if has_attained_entries && capability_ids.is_empty() {
             out.push(finding(
                 "CAP-MIG-001",
                 ctx.sev("CAP-MIG-001", crate::findings::Severity::Warn),
@@ -723,8 +670,6 @@ fn check_capability_migration(ctx: &RuleContext, out: &mut Vec<Finding>) {
                     note.title()
                 ),
             ));
-            // One finding per register is sufficient
-            return;
         }
     }
 }
@@ -732,11 +677,35 @@ fn check_capability_migration(ctx: &RuleContext, out: &mut Vec<Finding>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::frontmatter::{parse, FmView};
+    use crate::vault::{Note, VaultIndex};
 
     fn classes(frontmatter: &str) -> Vec<LegacyTechnologyClassification> {
         let parsed = parse(frontmatter);
         legacy_classifications(&FmView::new(&parsed.value))
+    }
+
+    fn note_from_frontmatter(path: &str, frontmatter: &str) -> Note {
+        let parsed = parse(frontmatter);
+        Note {
+            path: path.to_string(),
+            frontmatter: parsed.value,
+            body: String::new(),
+            content_hash: 0,
+            parse_error: None,
+            has_frontmatter: parsed.has_block,
+            curated: true,
+        }
+    }
+
+    fn index_with_notes(notes: Vec<Note>) -> VaultIndex {
+        VaultIndex {
+            root: std::path::PathBuf::new(),
+            notes,
+            all_files: std::collections::HashSet::new(),
+            file_hashes: Vec::new(),
+        }
     }
 
     #[test]
@@ -771,5 +740,33 @@ mod tests {
             classes("---\nroad_id: r\ntechnology_class: historical-compatibility\n---\n").len(),
             2
         );
+    }
+
+    #[test]
+    fn count_entities_sums_modern_and_legacy_records() {
+        let config = Config::default();
+        let notes = vec![
+            note_from_frontmatter(
+                "portfolio.md",
+                "---\ntype: technology-portfolio\nstatus: active\n---\n",
+            ),
+            note_from_frontmatter(
+                "road.md",
+                "---\ntype: technology-road\nstatus: active\n---\n",
+            ),
+            note_from_frontmatter("cap.md", "---\ntype: capability\nstatus: active\n---\n"),
+            note_from_frontmatter(
+                "legacy.md",
+                "---\ntype: technology-node\nstatus: active\n---\n",
+            ),
+        ];
+        let index = index_with_notes(notes);
+        let summary = domain::count_entities(&index, &config);
+        assert_eq!(summary.modern_portfolio_count, 1);
+        assert_eq!(summary.modern_road_count, 1);
+        assert_eq!(summary.modern_capability_count, 1);
+        assert_eq!(summary.legacy_node_count, 1);
+        assert_eq!(summary.modern_entity_count, 3);
+        assert_eq!(summary.legacy_entity_count, 1);
     }
 }

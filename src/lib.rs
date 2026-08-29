@@ -11,6 +11,7 @@ pub mod capability;
 pub mod config;
 pub mod continuity;
 pub mod coverage;
+pub mod domain;
 pub mod findings;
 pub mod frontmatter;
 pub mod legacy_technology;
@@ -101,13 +102,14 @@ pub fn validate_with_config_path(
         &boundary,
         &findings,
         index.notes.len(),
+        &index,
         config,
         config_path,
         previous.as_ref(),
     );
 
     // Generate continuity report
-    let continuity_markdown = continuity::render(&boundary, &source_idx, config);
+    let continuity_markdown = continuity::render(&boundary, &source_idx, config, &index);
 
     Ok(ValidationOutcome {
         boundary,

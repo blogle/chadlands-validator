@@ -9,9 +9,15 @@ use std::collections::HashSet;
 use crate::boundary::{diagnose_source_frontiers, SourceFrontierRelationship, StateBoundary};
 use crate::config::Config;
 use crate::source_index::{resolve_cursor, SourceIndex};
+use crate::vault::VaultIndex;
 
 /// Render the Continuity Report as Markdown.
-pub fn render(boundary: &StateBoundary, source_index: &SourceIndex, config: &Config) -> String {
+pub fn render(
+    boundary: &StateBoundary,
+    source_index: &SourceIndex,
+    config: &Config,
+    vault_index: &VaultIndex,
+) -> String {
     let mut out = String::new();
 
     // Frontmatter
@@ -41,7 +47,7 @@ pub fn render(boundary: &StateBoundary, source_index: &SourceIndex, config: &Con
     render_technology_coverage(&mut out, source_index, config);
 
     // Resurfacing Candidates
-    render_resurfacing(&mut out, source_index, config);
+    render_resurfacing(&mut out, source_index, config, vault_index);
 
     // Owed Technology Receipts
     render_receipts(&mut out, source_index, config);
@@ -140,19 +146,7 @@ fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _con
     let active_legacy_portfolios = source_index.active_legacy_portfolio_count;
     let declared_child_roads = source_index.declared_child_road_count;
 
-    let receipt_coverage = if road_count > 0 {
-        "COMPLETE"
-    } else if legacy_node_count > 0 || active_legacy_portfolios > 0 {
-        "INCOMPLETE"
-    } else {
-        "NONE"
-    };
-
-    let capability_coverage = if capability_count > 0 {
-        "COMPLETE"
-    } else {
-        "INCOMPLETE"
-    };
+    let total_roads = road_count + legacy_node_count + active_legacy_portfolios;
 
     out.push_str("## Technology Monitoring Coverage\n\n");
     out.push_str(&format!(
@@ -171,16 +165,47 @@ fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _con
     out.push_str(&format!(
         "- declared current roads behind legacy representation: {declared_child_roads}\n"
     ));
-    out.push_str(&format!(
-        "- receipt monitoring coverage: {receipt_coverage}\n"
-    ));
-    out.push_str(&format!(
-        "- capability dormancy coverage: {capability_coverage}\n"
-    ));
     out.push('\n');
+
+    // Receipt-boundary coverage with explicit denominators
+    out.push_str("### Receipt-Boundary Coverage\n\n");
+    if road_count > 0 {
+        out.push_str(&format!(
+            "Road inventory coverage:\n{road_count} / {road_count} machine-readable road owners evaluated.\n\n"
+        ));
+        out.push_str(&format!(
+            "Receipt-boundary coverage:\n{road_count} / {road_count} machine-readable road owners evaluated.\n\n"
+        ));
+        out.push_str("Structured direct-source receipt events recognized:\n0.\n\n");
+        out.push_str("Narrative direct-source receipt semantic coverage:\nUNSUPPORTED.\n\n");
+    } else if legacy_node_count > 0 || active_legacy_portfolios > 0 {
+        out.push_str(&format!(
+            "Road inventory coverage:\n0 / {total_roads} technology objects have machine-readable road representation.\n\n"
+        ));
+        out.push_str("**Coverage incomplete:** technology receipt monitoring requires machine-readable road records. The current active technology frontier may be represented as legacy aggregates/projects and cannot yet be validated at road granularity.\n\n");
+    } else {
+        out.push_str("No technology objects indexed.\n\n");
+    }
+
+    // Capability coverage with explicit denominators
+    out.push_str("### Capability Coverage\n\n");
+    if capability_count > 0 {
+        out.push_str(&format!(
+            "Machine-readable capability-owner coverage:\n{capability_count} / {capability_count} capability owner records evaluated.\n\n"
+        ));
+        out.push_str("Machine-linked downstream-use coverage:\nsee reuse metrics below.\n\n");
+        out.push_str("Narrative semantic-use coverage:\nUNSUPPORTED.\n\n");
+    } else {
+        out.push_str("No machine-readable capability records indexed.\n\n");
+    }
 }
 
-fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Config) {
+fn render_resurfacing(
+    out: &mut String,
+    source_index: &SourceIndex,
+    config: &Config,
+    vault_index: &VaultIndex,
+) {
     // Build resurfacing candidates: tracked entities exceeding dormancy threshold.
     // Exclude deceased/closed/historical/completed/superseded entities from
     // strategy resurfacing (activity data is preserved, just not presented).
@@ -197,6 +222,8 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
     .iter()
     .copied()
     .collect();
+
+    let frontier = source_index.max_source_cursor;
 
     let mut candidates: Vec<ResurfacingCandidate> = Vec::new();
     let mut excluded_terminal = 0usize;
@@ -234,6 +261,24 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
         let last_material_year =
             last_material.and_then(|c| resolve_cursor(&source_index.cursor_epochs, c).1);
 
+        // Canonical source_cursor and reviewed_through_cursor from vault
+        let canonical_source_cursor = vault_index
+            .find_by_path(&identity.note_path)
+            .and_then(|n| n.fm().get_i64("source_cursor"));
+        let reviewed_through_cursor = vault_index
+            .find_by_path(&identity.note_path)
+            .and_then(|n| n.fm().get_i64("reviewed_through_cursor"));
+
+        // Cursor deltas relative to frontier
+        let mention_delta = match (frontier, last_mentioned) {
+            (Some(f), Some(m)) => Some(f - m),
+            _ => None,
+        };
+        let material_delta = match (frontier, last_material) {
+            (Some(f), Some(m)) => Some(f - m),
+            _ => None,
+        };
+
         // Check dormancy
         let mut is_dormant = false;
         let mut dormancy_reason = String::new();
@@ -247,7 +292,7 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
                 let age = current_year - last_year;
                 if age as f64 >= threshold {
                     is_dormant = true;
-                    dormancy_reason = format!("{}yr since material", age);
+                    dormancy_reason = format!("MATERIAL_DORMANCY: {age}yr since material");
                 }
             }
         }
@@ -262,7 +307,7 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
                     let age = current_year - last_year;
                     if age as f64 >= threshold {
                         is_dormant = true;
-                        dormancy_reason = format!("{}yr since mention", age);
+                        dormancy_reason = format!("NO_EXACT_SOURCE_MENTION: {age}yr since mention");
                     }
                 }
             }
@@ -275,7 +320,7 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
             && !source_index.messages.is_empty()
         {
             is_dormant = true;
-            dormancy_reason = "no mention in indexed source".to_string();
+            dormancy_reason = "NO_EXACT_SOURCE_MENTION: no mention in indexed source".to_string();
         }
 
         // Has material evidence but no mention — still show but with different reason
@@ -285,31 +330,54 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
             && !source_index.messages.is_empty()
         {
             is_dormant = true;
-            dormancy_reason = "no mention in indexed source (material evidence exists)".to_string();
+            dormancy_reason =
+                "NO_EXACT_SOURCE_MENTION: no mention in indexed source (material evidence exists)"
+                    .to_string();
         }
 
         if is_dormant {
             candidates.push(ResurfacingCandidate {
+                stable_id: identity
+                    .canonical_id
+                    .clone()
+                    .unwrap_or_else(|| format!("path:{}", identity.note_path)),
                 title: identity.title.clone(),
                 type_name: identity.type_name.clone(),
-                last_mentioned_cursor: last_mentioned,
+                status: identity.status.clone(),
+                lifecycle: identity.lifecycle.clone(),
+                canonical_source_cursor,
+                reviewed_through_cursor,
                 last_mentioned_year,
                 last_material_cursor: last_material,
                 last_material_year,
+                frontier,
+                mention_delta,
+                material_delta,
                 dormancy: dormancy_reason,
                 record_path: identity.note_path.clone(),
             });
         }
     }
 
-    // Sort by last_mentioned_cursor ascending (oldest first)
-    candidates.sort_by_key(|c| c.last_mentioned_cursor.unwrap_or(0));
+    // Sort by material_cursor delta descending (most stale first),
+    // then by mention delta, then by stable_id for determinism.
+    candidates.sort_by(|a, b| {
+        b.material_delta
+            .unwrap_or(i64::MAX)
+            .cmp(&a.material_delta.unwrap_or(i64::MAX))
+            .then_with(|| {
+                b.mention_delta
+                    .unwrap_or(i64::MAX)
+                    .cmp(&a.mention_delta.unwrap_or(i64::MAX))
+            })
+            .then_with(|| a.stable_id.cmp(&b.stable_id))
+    });
 
     let total = candidates.len();
     let shown = candidates.len().min(config.max_resurfacing);
     let tracked_total = source_index.identities.len();
 
-    out.push_str("## Resurfacing Candidates\n\n");
+    out.push_str("## Play / Research Resurfacing Queue\n\n");
     out.push_str(&format!(
         "Tracked identities: {tracked_total} ({} excluded as terminal/deceased/historical)\n\n",
         excluded_terminal,
@@ -320,18 +388,26 @@ fn render_resurfacing(out: &mut String, source_index: &SourceIndex, config: &Con
         return;
     }
 
-    out.push_str("| Entity | Type | Last Mention | Last Material | Dormancy | Record |\n");
-    out.push_str("|---|---|---:|---:|---|---|\n");
+    out.push_str("| Stable ID | Entity | Type | Status | Lifecycle | Canonical Cursor | Reviewed Cursor | Last Mention | Last Material | Frontier | Mention Δ | Material Δ | Reason | Record |\n");
+    out.push_str("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|\n");
 
     for c in candidates.iter().take(shown) {
         let last_material_display =
             format_material_cursor(c.last_material_cursor, c.last_material_year);
         out.push_str(&format!(
-            "| {} | {} | {} | {} | {} | `{}` |\n",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | `{}` |\n",
+            c.stable_id,
             c.title,
             c.type_name,
+            c.status.as_deref().unwrap_or("—"),
+            c.lifecycle.as_deref().unwrap_or("—"),
+            opt_i64(c.canonical_source_cursor),
+            opt_i64(c.reviewed_through_cursor),
             opt_i64(c.last_mentioned_year),
             last_material_display,
+            opt_i64(c.frontier),
+            opt_i64(c.mention_delta),
+            opt_i64(c.material_delta),
             c.dormancy,
             c.record_path,
         ));
@@ -460,7 +536,7 @@ fn render_capabilities(out: &mut String, source_index: &SourceIndex, config: &Co
     let mut total_capabilities = 0usize;
 
     for identity in &source_index.identities {
-        if identity.type_name != "capability" {
+        if !config.capability_types.contains(&identity.type_name) {
             continue;
         }
         total_capabilities += 1;
@@ -485,29 +561,34 @@ fn render_capabilities(out: &mut String, source_index: &SourceIndex, config: &Co
     let total = dormant.len();
     let shown = dormant.len().min(config.max_capabilities);
 
-    out.push_str("## Dormant Attained Capabilities\n\n");
+    out.push_str("## Capabilities With No Machine-Linked Downstream Use Evidence\n\n");
     out.push_str(&format!(
-        "Durable capability records indexed: {total_capabilities}\n\n"
+        "Machine-readable durable capability owners: {total_capabilities}\n\n"
     ));
 
     if total_capabilities == 0 {
         out.push_str(
             "No machine-readable capability records indexed. \
-             Dormancy analysis requires capability representation.\n\n",
+             Capability use analysis requires capability representation.\n\n",
         );
         return;
     }
 
     if dormant.is_empty() {
         out.push_str(&format!(
-            "No dormant capabilities detected among {total_capabilities} indexed records.\n\n"
+            "All {total_capabilities} indexed capability records have machine-linked downstream use evidence.\n\n"
         ));
         return;
     }
 
     out.push_str(&format!(
-        "**{total}** of {total_capabilities} capabilities have no evidenced use in indexed source:\n\n"
+        "**{total}** of {total_capabilities} capabilities have no deterministic \
+         machine-linked downstream-use evidence in indexed source:\n\n"
     ));
+    out.push_str(
+        "> No deterministic machine-linked downstream-use evidence was located. \
+     This MUST NOT imply the capability was truly unused in the world.\n\n",
+    );
     out.push_str("| Capability | Depth | Last Evidenced Use | Evidence Types | Record |\n");
     out.push_str("|---|---|---:|---|---|\n");
 
@@ -604,12 +685,19 @@ fn render_metrics(out: &mut String, source_index: &SourceIndex) {
 // ---------------------------------------------------------------------------
 
 struct ResurfacingCandidate {
+    stable_id: String,
     title: String,
     type_name: String,
-    last_mentioned_cursor: Option<i64>,
+    status: Option<String>,
+    lifecycle: Option<String>,
+    canonical_source_cursor: Option<i64>,
+    reviewed_through_cursor: Option<i64>,
     last_mentioned_year: Option<i64>,
     last_material_cursor: Option<i64>,
     last_material_year: Option<i64>,
+    frontier: Option<i64>,
+    mention_delta: Option<i64>,
+    material_delta: Option<i64>,
     dormancy: String,
     record_path: String,
 }

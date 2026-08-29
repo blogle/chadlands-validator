@@ -88,7 +88,14 @@ fn check_unresolved_stable_ids(
 }
 
 fn looks_like_stable_id(s: &str) -> bool {
-    s.starts_with("TR-") || s.starts_with("CAP-") || s.starts_with("TP-") || s.starts_with("TN-")
+    s.starts_with("road:")
+        || s.starts_with("capability:")
+        || s.starts_with("portfolio:")
+        || s.starts_with("int-")
+        || s.starts_with("TR-")
+        || s.starts_with("CAP-")
+        || s.starts_with("TP-")
+        || s.starts_with("TN-")
 }
 
 /// CHAD-COVER-002/003/004: check unresolved candidates.
