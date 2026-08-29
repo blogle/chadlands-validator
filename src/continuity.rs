@@ -53,6 +53,12 @@ pub fn render(
     let classified = gaps::classify_gaps(findings, source_index, boundary);
     render_actionable_queue(&mut out, &classified, config);
 
+    // Technology Progress (§10)
+    render_technology_progress(&mut out, source_index, config, vault_index);
+
+    // Capability Progress & Reuse (§11-13)
+    render_capability_progress(&mut out, source_index, config, vault_index);
+
     // Resurfacing Candidates
     render_resurfacing(&mut out, source_index, config, vault_index);
 
@@ -198,6 +204,350 @@ fn render_actionable_queue(out: &mut String, classified: &[gaps::GapCandidate], 
     }
 
     out.push('\n');
+}
+
+// ---------------------------------------------------------------------------
+// §10: Technology Progress
+// ---------------------------------------------------------------------------
+
+fn render_technology_progress(
+    out: &mut String,
+    source_index: &SourceIndex,
+    config: &Config,
+    vault_index: &VaultIndex,
+) {
+    out.push_str("## Technology Progress\n\n");
+
+    // Count roads by lifecycle status
+    let mut lifecycle_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
+    let mut terminal_with_year: Vec<(i64, String)> = Vec::new();
+
+    for note in &vault_index.notes {
+        if !note.curated || note.parse_error.is_some() {
+            continue;
+        }
+        let type_name = note.type_str().unwrap_or_default();
+        if !config.road_types.contains(&type_name) {
+            continue;
+        }
+        let fm = note.fm();
+        let lifecycle = fm.get_str("lifecycle").unwrap_or_default();
+        let status = note.status().unwrap_or_default();
+
+        // Determine effective lifecycle
+        let effective = if lifecycle.is_empty() {
+            status.as_str()
+        } else {
+            lifecycle.as_str()
+        };
+
+        let bucket = match effective {
+            "accepted" => "accepted",
+            "executing" | "in-progress" | "progress" => "active",
+            "stalled" => "stalled",
+            "completed" => "completed",
+            "failed" => "failed",
+            "closed" => "closed",
+            "superseded" => "superseded",
+            "terminal" => "terminal",
+            _ => "other",
+        };
+        *lifecycle_counts.entry(bucket).or_insert(0) += 1;
+
+        // Track terminal records with deterministic year resolution
+        if matches!(
+            effective,
+            "completed" | "failed" | "closed" | "superseded" | "terminal"
+        ) {
+            // Try to resolve terminal year from frontmatter fields
+            let terminal_year = fm
+                .get_i64("completed_year")
+                .or_else(|| fm.get_i64("terminal_result_year"))
+                .or_else(|| fm.get_i64("closed_year"))
+                .or_else(|| {
+                    // Try cursor epoch resolution for terminal_result_cursor
+                    fm.get_i64("terminal_result_cursor").and_then(|c| {
+                        source_index
+                            .cursor_epochs
+                            .iter()
+                            .rev()
+                            .find(|e| c >= e.cursor_start && c <= e.cursor_end)
+                            .and_then(|e| e.year)
+                    })
+                });
+            if let Some(year) = terminal_year {
+                terminal_with_year.push((year, fm.get_str("road_id").unwrap_or_default()));
+            }
+        }
+    }
+
+    // Lifecycle breakdown
+    out.push_str("### Road Lifecycle Counts\n\n");
+    for (bucket, count) in &lifecycle_counts {
+        out.push_str(&format!("- {bucket}: {count}\n"));
+    }
+    out.push_str(&format!(
+        "- total: {}\n",
+        lifecycle_counts.values().sum::<usize>()
+    ));
+    out.push('\n');
+
+    // Upcoming terminal years
+    out.push_str("### Upcoming Terminal Years\n\n");
+    if let Some(current_year) = boundary_current_year(source_index) {
+        let mut upcoming: Vec<_> = terminal_with_year
+            .iter()
+            .filter(|(y, _)| *y >= current_year)
+            .collect();
+        upcoming.sort_by_key(|(y, _)| *y);
+        if upcoming.is_empty() {
+            out.push_str("No upcoming terminal years within indexed records.\n\n");
+        } else {
+            out.push_str("| Year | Road |\n|---:|---|\n");
+            for (y, road_id) in upcoming.iter().take(12) {
+                out.push_str(&format!("| {y} | {road_id} |\n"));
+            }
+            out.push('\n');
+        }
+    } else {
+        out.push_str("Current year unknown — cannot compute upcoming terminal years.\n\n");
+    }
+
+    // Rolling windows (conservative: only count when year is deterministic)
+    out.push_str("### Rolling Windows (deterministic year only)\n\n");
+    if let Some(current_year) = boundary_current_year(source_index) {
+        let windows = [1, 3, 5];
+        // Collect accepted-by-year and terminal-by-year
+        let mut accepted_by_year: std::collections::BTreeMap<i64, usize> =
+            std::collections::BTreeMap::new();
+        for note in &vault_index.notes {
+            if !note.curated || note.parse_error.is_some() {
+                continue;
+            }
+            let type_name = note.type_str().unwrap_or_default();
+            if !config.road_types.contains(&type_name) {
+                continue;
+            }
+            let fm = note.fm();
+            if let Some(year) = fm.get_i64("accepted_year") {
+                *accepted_by_year.entry(year).or_insert(0) += 1;
+            }
+        }
+
+        for &window in &windows {
+            let start = current_year - window + 1;
+            let accepted: usize = (start..=current_year)
+                .map(|y| accepted_by_year.get(&y).copied().unwrap_or(0))
+                .sum();
+            let completed: usize = terminal_with_year
+                .iter()
+                .filter(|(y, _)| *y >= start && *y <= current_year)
+                .count();
+            out.push_str(&format!(
+                "- last {window} resolved year(s) ({start}–{current_year}): \
+                 {accepted} accepted, {completed} terminally completed/failed\n"
+            ));
+        }
+    } else {
+        out.push_str("Current year unknown — rolling windows unavailable.\n");
+    }
+    out.push('\n');
+
+    // Capacity-release: UNSUPPORTED (§14)
+    out.push_str("### Capacity-Release Telemetry\n\n");
+    out.push_str("capacity-release semantic telemetry: UNSUPPORTED\n");
+    out.push_str("capacity-reinvestment semantic telemetry: UNSUPPORTED\n\n");
+}
+
+fn boundary_current_year(source_index: &SourceIndex) -> Option<i64> {
+    source_index.cursor_epochs.last().and_then(|e| e.year)
+}
+
+// ---------------------------------------------------------------------------
+// §11-13: Capability Progress & Reuse
+// ---------------------------------------------------------------------------
+
+fn render_capability_progress(
+    out: &mut String,
+    source_index: &SourceIndex,
+    config: &Config,
+    vault_index: &VaultIndex,
+) {
+    out.push_str("## Capability Progress\n\n");
+
+    let mut total_capabilities = 0usize;
+    let mut state_represented = 0usize;
+    let mut attainment_year_represented = 0usize;
+    let mut attainment_cursor_represented = 0usize;
+    let mut depth_represented = 0usize;
+    let mut attained_count = 0usize;
+    let mut attained_with_year: Vec<i64> = Vec::new();
+
+    // Reuse metrics
+    let mut roads_with_prereq = 0usize;
+    let mut roads_with_cheapener = 0usize;
+    let mut total_reuse_edges = 0usize;
+    let mut capabilities_with_use = std::collections::HashSet::new();
+
+    for note in &vault_index.notes {
+        if !note.curated || note.parse_error.is_some() {
+            continue;
+        }
+        let type_name = note.type_str().unwrap_or_default();
+        if !config.capability_types.contains(&type_name) {
+            continue;
+        }
+        total_capabilities += 1;
+        let fm = note.fm();
+
+        // Capability-state represented
+        if fm.get_str("capability_state").is_some() {
+            state_represented += 1;
+        }
+
+        // Attainment year
+        if fm.get_i64("attained_year").is_some() {
+            attainment_year_represented += 1;
+            if let Some(y) = fm.get_i64("attained_year") {
+                attained_with_year.push(y);
+            }
+        }
+
+        // Attainment cursor
+        if fm.get_i64("attainment_cursor").is_some() {
+            attainment_cursor_represented += 1;
+        }
+
+        // Depth
+        if fm.get_str("depth").is_some() {
+            depth_represented += 1;
+        }
+
+        // Attained check
+        let lifecycle = fm.get_str("lifecycle").unwrap_or_default();
+        let cap_state = fm.get_str("capability_state").unwrap_or_default();
+        let is_attained = lifecycle.starts_with("attained")
+            || cap_state == "attained"
+            || lifecycle == "reproduced"
+            || lifecycle == "diffused";
+        if is_attained {
+            attained_count += 1;
+        }
+    }
+
+    // Reuse edges from roads
+    for note in &vault_index.notes {
+        if !note.curated || note.parse_error.is_some() {
+            continue;
+        }
+        let type_name = note.type_str().unwrap_or_default();
+        if !config.road_types.contains(&type_name) {
+            continue;
+        }
+        let fm = note.fm();
+
+        let requires: Vec<String> = fm.get_list("requires");
+        let cheapened: Vec<String> = fm.get_list("cheapened_by");
+
+        if !requires.is_empty() {
+            roads_with_prereq += 1;
+            for cap in &requires {
+                let clean = cap.trim().to_string();
+                if !clean.is_empty() {
+                    total_reuse_edges += 1;
+                    capabilities_with_use.insert(clean.clone());
+                }
+            }
+        }
+        if !cheapened.is_empty() {
+            roads_with_cheapener += 1;
+            for cap in &cheapened {
+                let clean = cap.trim().to_string();
+                if !clean.is_empty() {
+                    total_reuse_edges += 1;
+                    capabilities_with_use.insert(clean);
+                }
+            }
+        }
+    }
+
+    let capabilities_reused_by_roads = capabilities_with_use.len();
+
+    // Render capability representation denominators
+    out.push_str("### Capability Representation\n\n");
+    out.push_str(&format!(
+        "- machine-readable durable capability owners: {total_capabilities}\n"
+    ));
+    if total_capabilities > 0 {
+        out.push_str(&format!(
+            "- capability-state represented: {state_represented}/{total_capabilities}\n"
+        ));
+        out.push_str(&format!(
+            "- attainment year represented: {attainment_year_represented}/{total_capabilities}\n"
+        ));
+        out.push_str(&format!(
+            "- attainment cursor represented: {attainment_cursor_represented}/{total_capabilities}\n"
+        ));
+        out.push_str(&format!(
+            "- depth represented: {depth_represented}/{total_capabilities}\n"
+        ));
+    }
+    out.push('\n');
+
+    // Rolling windows for attained capabilities
+    out.push_str("### Newly Attained Capabilities\n\n");
+    if let Some(current_year) = boundary_current_year(source_index) {
+        let windows = [1, 3, 5];
+        for &window in &windows {
+            let start = current_year - window + 1;
+            let count = attained_with_year
+                .iter()
+                .filter(|y| **y >= start && **y <= current_year)
+                .count();
+            out.push_str(&format!(
+                "- last {window} resolved year(s) ({start}–{current_year}): {count} newly attained\n"
+            ));
+        }
+    } else {
+        out.push_str("Current year unknown — rolling windows unavailable.\n");
+    }
+    out.push('\n');
+
+    // §13: Reuse telemetry
+    out.push_str("### Machine-Linked Downstream Reuse\n\n");
+    if total_capabilities > 0 {
+        out.push_str(&format!(
+            "- attained capabilities represented: {attained_count}\n"
+        ));
+        out.push_str(&format!(
+            "- capabilities explicitly reused by later roads: {capabilities_reused_by_roads}\n"
+        ));
+        out.push_str(&format!(
+            "- roads accepted with >=1 explicit capability prerequisite: {roads_with_prereq}\n"
+        ));
+        out.push_str(&format!(
+            "- roads explicitly cheapened by prior capabilities: {roads_with_cheapener}\n"
+        ));
+        out.push_str(&format!(
+            "- total explicit capability→road reuse edges: {total_reuse_edges}\n"
+        ));
+        let no_reuse = total_capabilities.saturating_sub(capabilities_reused_by_roads);
+        out.push_str(&format!(
+            "- capabilities with no machine-linked downstream reuse: {no_reuse}\n"
+        ));
+    } else {
+        out.push_str("No machine-readable capability records indexed.\n");
+    }
+    out.push('\n');
+
+    // Narrative semantic-use coverage: UNSUPPORTED
+    out.push_str(
+        "> Narrative semantic-use coverage: **UNSUPPORTED**. \
+     Deterministic machine-linked reuse detection is limited to explicit \
+     structured edges (requires, cheapened_by, produces). Narrative prose \
+     describing capability use cannot be reliably parsed.\n\n",
+    );
 }
 
 fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _config: &Config) {
