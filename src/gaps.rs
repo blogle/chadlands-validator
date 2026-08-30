@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use crate::boundary::StateBoundary;
 use crate::findings::{Finding, Findings};
 use crate::source_index::{ActivityEvidenceKind, SourceIndex};
+use crate::vault::VaultIndex;
 
 // ---------------------------------------------------------------------------
 // Taxonomy
@@ -42,7 +43,7 @@ pub enum GapKind {
 
 impl GapKind {
     /// Strict priority ordering: lower is more urgent.
-    fn priority_class(self) -> u8 {
+    pub fn priority_class(self) -> u8 {
         match self {
             Self::StructuralError => 0,
             Self::AuthorityGap => 1,
@@ -139,6 +140,7 @@ pub fn classify_gaps(
     findings: &Findings,
     source_index: &SourceIndex,
     boundary: &StateBoundary,
+    vault_index: &VaultIndex,
 ) -> Vec<GapCandidate> {
     let mut gaps: Vec<GapCandidate> = Vec::new();
 
@@ -186,38 +188,99 @@ pub fn classify_gaps(
 
     // 3. Lifecycle events: terminal events create MaterializationGap
     //    when the canonical state hasn't been updated to reflect them.
+    //    §3: chronology-safe — event.cursor must exceed canonical
+    //    source_cursor, and canonical must not already be terminal.
     for event in &source_index.lifecycle_events {
         if !event.outcome.is_terminal() {
             continue;
         }
-        // Find the identity to check canonical state
         if let Some(identity) = source_index
             .identities
             .iter()
             .find(|id| id.key == event.identity_key)
         {
-            // If the identity is still active/in-progress, the terminal
-            // event represents a materialization gap
-            let is_active = identity
-                .lifecycle
-                .as_deref()
-                .map(|l| {
-                    l.starts_with("accepted")
-                        || l.starts_with("executing")
-                        || l.starts_with("in-progress")
-                        || l.starts_with("progress")
-                })
-                .unwrap_or(false)
-                || identity
-                    .status
-                    .as_deref()
-                    .map(|s| s == "active")
-                    .unwrap_or(false);
+            // Check canonical state from vault frontmatter
+            let note = vault_index.find_by_path(&identity.note_path);
+            let (canonical_source_cursor, reviewed_through_cursor, is_canonical_terminal) =
+                if let Some(n) = note {
+                    let fm = n.fm();
+                    let sc = fm.get_i64("source_cursor");
+                    let rtc = fm.get_i64("reviewed_through_cursor");
+                    let lifecycle = fm.get_str("lifecycle").unwrap_or_default();
+                    let status = n.status().unwrap_or_default();
+                    let terminal = lifecycle.starts_with("completed")
+                        || lifecycle.starts_with("failed")
+                        || lifecycle.starts_with("closed")
+                        || lifecycle.starts_with("superseded")
+                        || lifecycle == "terminal"
+                        || status == "completed"
+                        || status == "failed"
+                        || status == "superseded";
+                    (sc, rtc, terminal)
+                } else {
+                    (None, None, false)
+                };
 
-            if is_active {
-                let frontier = source_index.max_source_cursor;
-                let cursor_delta = frontier.map(|f| f - event.cursor);
+            // §3.1: Canonical already terminal at same/newer cursor → no gap
+            if is_canonical_terminal {
+                continue;
+            }
 
+            // §3.1: event.cursor must exceed canonical source_cursor
+            // (the event is newer than what the canonical record represents)
+            if let Some(canonical_sc) = canonical_source_cursor {
+                if event.cursor <= canonical_sc {
+                    continue;
+                }
+            }
+
+            // §3.3: If event.cursor <= reviewed_through_cursor but
+            // canonical is not terminal, this is a representation
+            // contradiction — the record was reviewed past the
+            // conflicting evidence. Surface as representation divergence.
+            let is_behind_review = reviewed_through_cursor
+                .map(|rtc| event.cursor <= rtc)
+                .unwrap_or(false);
+
+            let frontier = source_index.max_source_cursor;
+            let cursor_delta = frontier.map(|f| f - event.cursor);
+
+            if is_behind_review {
+                gaps.push(GapCandidate {
+                    kind: GapKind::RepresentationDivergence,
+                    stable_id: Some(event.identity_key.clone()),
+                    title: format!(
+                        "{}: canonical reviewed past terminal event but state is {}",
+                        identity.title,
+                        identity
+                            .lifecycle
+                            .as_deref()
+                            .or(identity.status.as_deref())
+                            .unwrap_or("unknown")
+                    ),
+                    record_path: Some(std::path::PathBuf::from(&identity.note_path)),
+                    record_type: Some(identity.type_name.clone()),
+                    canonical_status: identity.status.clone(),
+                    canonical_lifecycle: identity.lifecycle.clone(),
+                    canonical_source_cursor,
+                    reviewed_through_cursor,
+                    evidence_cursor: Some(event.cursor),
+                    evidence_kind: Some(event.evidence_kind),
+                    evidence_path: Some(event.source_file.clone()),
+                    evidence_line: Some(event.source_line),
+                    current_source_frontier: frontier,
+                    cursor_delta,
+                    reason_code: "REVIEWED_PAST_TERMINAL_EVENT".to_string(),
+                    recommended_operation: RecommendedOperation::SchemaMaintenance,
+                    sort_key: (
+                        GapKind::RepresentationDivergence.priority_class(),
+                        -cursor_delta.unwrap_or(0),
+                        0,
+                        event.identity_key.clone(),
+                        identity.note_path.clone(),
+                    ),
+                });
+            } else {
                 gaps.push(GapCandidate {
                     kind: GapKind::MaterializationGap,
                     stable_id: Some(event.identity_key.clone()),
@@ -235,8 +298,8 @@ pub fn classify_gaps(
                     record_type: Some(identity.type_name.clone()),
                     canonical_status: identity.status.clone(),
                     canonical_lifecycle: identity.lifecycle.clone(),
-                    canonical_source_cursor: None,
-                    reviewed_through_cursor: None,
+                    canonical_source_cursor,
+                    reviewed_through_cursor,
                     evidence_cursor: Some(event.cursor),
                     evidence_kind: Some(event.evidence_kind),
                     evidence_path: Some(event.source_file.clone()),
@@ -258,7 +321,8 @@ pub fn classify_gaps(
     }
 
     // 4. Suppress AuthorityGap for identities that have a terminal
-    //    lifecycle event — the MaterializationGap takes priority.
+    //    lifecycle event for the same current road lifecycle.
+    //    §4: structured join via road_id, not substring matching.
     let lifecycle_identity_keys: std::collections::HashSet<&str> = source_index
         .lifecycle_events
         .iter()
@@ -266,21 +330,33 @@ pub fn classify_gaps(
         .map(|e| e.identity_key.as_str())
         .collect();
 
+    // Build a set of note paths that have terminal lifecycle events
+    let lifecycle_note_paths: std::collections::HashSet<String> = source_index
+        .lifecycle_events
+        .iter()
+        .filter(|e| e.outcome.is_terminal())
+        .filter_map(|e| {
+            source_index
+                .identities
+                .iter()
+                .find(|id| id.key == e.identity_key)
+                .map(|id| id.note_path.clone())
+        })
+        .collect();
+
     gaps.retain(|g| {
         if g.kind == GapKind::AuthorityGap {
+            // Check stable_id match
             if let Some(stable_id) = &g.stable_id {
-                return !lifecycle_identity_keys.contains(stable_id.as_str());
-            }
-            // Also check the title (finding message) and record_path
-            // for references to identities with lifecycle events
-            for key in &lifecycle_identity_keys {
-                if g.title.contains(key) {
+                if lifecycle_identity_keys.contains(stable_id.as_str()) {
                     return false;
                 }
-                if let Some(path) = &g.record_path {
-                    if path.to_string_lossy().contains(key) {
-                        return false;
-                    }
+            }
+            // Check structured path match
+            if let Some(path) = &g.record_path {
+                let path_str = path.to_string_lossy();
+                if lifecycle_note_paths.contains(path_str.as_ref()) {
+                    return false;
                 }
             }
         }
@@ -295,31 +371,33 @@ pub fn classify_gaps(
 
 fn classify_finding(
     f: &Finding,
-    source_index: &SourceIndex,
+    _source_index: &SourceIndex,
     _boundary: &StateBoundary,
 ) -> Option<GapCandidate> {
-    let frontier = source_index.max_source_cursor;
+    let frontier = _source_index.max_source_cursor;
 
     let (kind, operation, reason) = match f.rule {
-        // Structural / boundary errors
+        // §6.4: State boundary structural errors → StructuralError
         "CHAD-STATE-001" | "CHAD-STATE-002" | "CHAD-STATE-003" | "CHAD-STATE-004" => (
             GapKind::StructuralError,
             RecommendedOperation::SchemaMaintenance,
             "STATE_BOUNDARY_DEFECT".to_string(),
         ),
 
-        // Cursor beyond evidence
+        // §6.4: Cursor beyond evidence → RepresentationDivergence
         "CHAD-CURSOR-002" | "CHAD-CURSOR-005" => (
             GapKind::RepresentationDivergence,
             RecommendedOperation::SchemaMaintenance,
             "CURSOR_BEYOND_EVIDENCE".to_string(),
         ),
 
-        // Freshness failures
+        // §6.2: Freshness failures → SchemaGap (stale review, not proof of
+        // source evidence). Only upgrade to MaterializationGap if there is
+        // independent lifecycle event evidence (handled in step 3).
         "CHAD-FRESH-001" | "CHAD-FRESH-002" => (
-            GapKind::MaterializationGap,
-            RecommendedOperation::PlayerSideReconciliation,
-            "CANONICAL_STATE_STALE".to_string(),
+            GapKind::SchemaGap,
+            RecommendedOperation::SchemaMaintenance,
+            "STALE_REVIEW_FRONTIER".to_string(),
         ),
 
         // Overdue receipts → AuthorityGap
@@ -367,21 +445,30 @@ fn classify_finding(
             "OWNER_SCHEMA_DEBT".to_string(),
         ),
 
-        // Identity issues
+        // §6.3: Identity findings → SchemaGap (structural debt, not world contradiction)
         "CHAD-IDENTITY-001" | "CHAD-IDENTITY-002" | "CHAD-IDENTITY-004" => (
-            GapKind::Contradiction,
-            RecommendedOperation::ContradictionAdjudication,
-            "IDENTITY_CONTRADICTION".to_string(),
+            GapKind::SchemaGap,
+            RecommendedOperation::SchemaMaintenance,
+            "IDENTITY_SCHEMA_DEBT".to_string(),
         ),
 
-        // Schema structural
-        "CHAD-SCHEMA-001" | "CHAD-SCHEMA-002" | "CHAD-SCHEMA-003" => (
+        // §6.1: Schema structural — respect severity. Only ERROR-level
+        // findings occupy StructuralError priority.
+        "CHAD-SCHEMA-001" => (
             GapKind::StructuralError,
             RecommendedOperation::SchemaMaintenance,
             "SCHEMA_DEFECT".to_string(),
         ),
+        "CHAD-SCHEMA-002" | "CHAD-SCHEMA-003" => {
+            // These are typically WARN-level schema debt
+            (
+                GapKind::SchemaGap,
+                RecommendedOperation::SchemaMaintenance,
+                "SCHEMA_DEBT".to_string(),
+            )
+        }
 
-        // Receipt conflicts
+        // Receipt conflicts → Contradiction
         "CHAD-RECEIPT-005" | "CHAD-RECEIPT-006" => (
             GapKind::Contradiction,
             RecommendedOperation::ContradictionAdjudication,
@@ -391,8 +478,6 @@ fn classify_finding(
         _ => return None,
     };
 
-    // Evidence cursor is not directly available from findings;
-    // it will be populated by lifecycle events in Patch 3.
     let evidence_cursor_val: Option<i64> = None;
     let cursor_delta = match (frontier, evidence_cursor_val) {
         (Some(f), Some(e)) => Some(f - e),
@@ -435,8 +520,11 @@ fn classify_finding(
 
 /// Build a bounded actionable queue from classified gaps.
 ///
-/// Returns at most `max_strict + max_fairness` candidates, plus full
-/// counts by kind.
+/// §7: Returns at most `max_strict + max_fairness` candidates.
+/// Strict priority items fill first (up to max_strict).
+/// Fairness items fill next (up to max_fairness).
+/// Total shown = min(max_strict + max_fairness, total candidates).
+/// Fairness never displaces strict.
 pub fn bounded_queue<'a>(
     gaps: &'a [GapCandidate],
     max_strict: usize,
@@ -460,11 +548,7 @@ pub fn bounded_queue<'a>(
         .collect();
 
     let strict_shown: Vec<&GapCandidate> = strict.into_iter().take(max_strict).collect();
-    let fairness_slots = max_strict.saturating_sub(strict_shown.len());
-    let fairness_shown: Vec<&GapCandidate> = fairness
-        .into_iter()
-        .take(fairness_slots.min(max_fairness))
-        .collect();
+    let fairness_shown: Vec<&GapCandidate> = fairness.into_iter().take(max_fairness).collect();
 
     let total = gaps.len();
     let shown = strict_shown.len() + fairness_shown.len();
@@ -545,10 +629,11 @@ mod tests {
     }
 
     #[test]
-    fn bounded_queue_fills_fairness_from_strict_surplus() {
+    fn bounded_queue_strict_and_fairness_independent() {
+        // §7: strict and fairness are independent allocations
         let mut gaps = Vec::new();
-        // Only 3 strict gaps
-        for i in 0..3 {
+        // 10 strict gaps
+        for i in 0..10 {
             gaps.push(GapCandidate {
                 kind: GapKind::AuthorityGap,
                 stable_id: None,
@@ -570,8 +655,8 @@ mod tests {
                 sort_key: (1, 0, 0, format!("{i:04}"), String::new()),
             });
         }
-        // 10 resurfacing candidates
-        for i in 0..10 {
+        // 6 resurfacing candidates
+        for i in 0..6 {
             gaps.push(GapCandidate {
                 kind: GapKind::ResurfacingCandidate,
                 stable_id: None,
@@ -594,8 +679,8 @@ mod tests {
             });
         }
         let result = bounded_queue(&gaps, 8, 4);
-        // 3 strict + up to 5 fairness (8 - 3 = 5, capped at 4)
-        assert_eq!(result.shown, 7);
-        assert_eq!(result.total, 13);
+        // 8 strict (capped) + 4 fairness (capped) = 12 shown
+        assert_eq!(result.shown, 12);
+        assert_eq!(result.total, 16);
     }
 }

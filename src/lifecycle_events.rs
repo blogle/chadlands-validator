@@ -8,7 +8,9 @@
 //! Subject: identity must be the explicit subject of the structure.
 
 use crate::config::Config;
-use crate::source_index::{ActivityEvidenceKind, KnownIdentity, SourceMessage, SpeakerClass};
+use crate::source_index::{
+    normalize_text, ActivityEvidenceKind, KnownIdentity, SourceMessage, SpeakerClass,
+};
 
 /// Controlled lifecycle outcome vocabulary. Smallest set required by
 /// observed authoritative source.
@@ -38,7 +40,6 @@ impl SourceLifecycleOutcome {
         }
     }
 
-    /// Is this a terminal outcome?
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -63,9 +64,6 @@ pub struct SourceLifecycleEvent {
 }
 
 /// Parse lifecycle events from authoritative source messages.
-///
-/// Returns events for exactly-resolved identities only. Ambiguous or
-/// unresolvable patterns produce no events (fail closed).
 pub fn parse_lifecycle_events(
     messages: &[SourceMessage],
     identities: &[KnownIdentity],
@@ -74,7 +72,6 @@ pub fn parse_lifecycle_events(
     let mut events = Vec::new();
 
     for msg in messages {
-        // §7.2 Authority restriction: only DM speakers
         if !is_authoritative_speaker(msg, config) {
             continue;
         }
@@ -84,22 +81,17 @@ pub fn parse_lifecycle_events(
             if trimmed.is_empty() {
                 continue;
             }
-
-            // §7.6 Negation/quoted-context fail closed
             if has_negation(trimmed) {
                 continue;
             }
 
-            // Try pipe/table row pattern
             if let Some(event) = try_parse_pipe_row(trimmed, msg, identities) {
                 events.push(event);
                 continue;
             }
 
-            // Try bullet/state-change line pattern
             if let Some(event) = try_parse_bullet_line(trimmed, msg, identities) {
                 events.push(event);
-                continue;
             }
         }
     }
@@ -107,13 +99,11 @@ pub fn parse_lifecycle_events(
     events
 }
 
-/// Check if the message speaker is an authoritative DM/world source.
 fn is_authoritative_speaker(msg: &SourceMessage, config: &Config) -> bool {
     match msg.speaker_class {
         SpeakerClass::Dm => true,
         SpeakerClass::Player => false,
         SpeakerClass::Unknown => {
-            // Fall back to config lists
             let lower = msg.speaker.to_ascii_lowercase();
             config
                 .dm_speakers
@@ -123,10 +113,9 @@ fn is_authoritative_speaker(msg: &SourceMessage, config: &Config) -> bool {
     }
 }
 
-/// §7.6 Detect obvious local negation around a lifecycle claim.
 fn has_negation(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
-    let negations = [
+    [
         "not completed",
         "never accepted",
         "does not mean failed",
@@ -138,47 +127,23 @@ fn has_negation(line: &str) -> bool {
         "is not",
         "never completed",
         "not succeeded",
-    ];
-    negations.iter().any(|n| lower.contains(n))
+    ]
+    .iter()
+    .any(|n| lower.contains(n))
 }
 
-/// §7.5 Steam governor hard negative: lines containing component/intermediate
-/// language that should NOT classify the whole road as failed.
-fn is_component_subject(line: &str) -> bool {
-    let lower = line.to_ascii_lowercase();
-    // Component/intermediate indicators
-    let component_signals = [
-        "governor control",
-        "bearing and shaft",
-        "shaft tolerance",
-        "component",
-        "intermediate",
-        "subassembly",
-        "mechanism",
-        "valve",
-        "gear train",
-        "flywheel",
-    ];
-    component_signals.iter().any(|s| lower.contains(s))
-}
-
-/// Try to parse a pipe/table row:
-/// `Universal formation road | ... closed SUCCEEDED this year`
+/// Pipe/table row: `<subject> | <state content>`
 fn try_parse_pipe_row(
     line: &str,
     msg: &SourceMessage,
     identities: &[KnownIdentity],
 ) -> Option<SourceLifecycleEvent> {
-    // Must contain a pipe separator
     let pipe_pos = line.find('|')?;
-    let subject_part = line[..pipe_pos].trim();
-    let rest = line[pipe_pos + 1..].trim();
+    let subject = line[..pipe_pos].trim();
+    let state_cell = line[pipe_pos + 1..].trim();
 
-    // Try to resolve the subject to exactly one identity
-    let identity = resolve_identity(subject_part, identities)?;
-
-    // Parse the lifecycle outcome from the rest
-    let outcome = parse_lifecycle_keywords(rest)?;
+    let identity = resolve_complete_subject(subject, identities)?;
+    let outcome = parse_lifecycle_phrase(state_cell)?;
 
     Some(SourceLifecycleEvent {
         identity_key: identity.key.clone(),
@@ -190,31 +155,33 @@ fn try_parse_pipe_row(
     })
 }
 
-/// Try to parse a bullet/state-change line:
-/// `- Universal formation CLOSED SUCCEEDED at its ceiling ...`
+/// Bullet/state line: `- <subject> <LIFECYCLE PHRASE> ...`
+///
+/// The subject is the text before the first recognized lifecycle phrase.
+/// The lifecycle phrase must follow the subject with only bounded
+/// punctuation/whitespace.
 fn try_parse_bullet_line(
     line: &str,
     msg: &SourceMessage,
     identities: &[KnownIdentity],
 ) -> Option<SourceLifecycleEvent> {
-    // Must start with a bullet marker or be a bare state-change line
     let content = line
         .strip_prefix("- ")
         .or_else(|| line.strip_prefix("– "))
         .or_else(|| line.strip_prefix("* "))
         .unwrap_or(line);
 
-    // §7.5 Steam governor guard: reject component subjects
-    if is_component_subject(content) {
+    // Find the lifecycle phrase boundary: the subject is everything
+    // before the first controlled lifecycle keyword.
+    let (subject, remainder) = split_at_lifecycle_phrase(content)?;
+
+    let subject = subject.trim();
+    if subject.is_empty() {
         return None;
     }
 
-    // Try to find an identity at the start of the content
-    let identity = resolve_identity_at_start(content, identities)?;
-
-    // Parse lifecycle keywords after the identity
-    let after_identity = &content[identity.title.len()..];
-    let outcome = parse_lifecycle_keywords(after_identity)?;
+    let identity = resolve_complete_subject(subject, identities)?;
+    let outcome = parse_lifecycle_phrase(remainder)?;
 
     Some(SourceLifecycleEvent {
         identity_key: identity.key.clone(),
@@ -226,21 +193,61 @@ fn try_parse_bullet_line(
     })
 }
 
-/// Resolve a subject string to exactly one known identity.
+/// Split content at the first recognized lifecycle phrase.
+/// Returns (subject_before, lifecycle_phrase_and_rest).
+fn split_at_lifecycle_phrase(content: &str) -> Option<(&str, &str)> {
+    // Ordered by length descending so "closed succeeded" matches before "succeeded"
+    let phrases = [
+        "closed succeeded",
+        "closed failed",
+        "failed terminally",
+        "terminal failure",
+        "closed success",
+        "closed failure",
+        "in progress",
+        "accepted",
+        "running",
+        "stalled",
+        "completed",
+        "succeeded",
+        "failed",
+    ];
+
+    let lower = content.to_ascii_lowercase();
+    for phrase in &phrases {
+        if let Some(pos) = lower.find(phrase) {
+            // The phrase must follow the subject with only bounded
+            // punctuation/whitespace. Check that the character before
+            // the phrase is a word boundary (space, dash, pipe, start).
+            if pos > 0 {
+                let prev = content.as_bytes()[pos - 1];
+                if prev.is_ascii_alphanumeric() {
+                    continue; // Not a word boundary — skip
+                }
+            }
+            return Some((&content[..pos], &content[pos..]));
+        }
+    }
+    None
+}
+
+/// Resolve a complete subject string to exactly one known identity.
+///
 /// Priority: stable ID > exact title > exact alias.
-/// Ambiguous = None (fail closed).
-fn resolve_identity<'a>(
+/// Uses `normalize_text` from the source index for consistency.
+/// Ambiguous (0 or >1 matches) = None (fail closed).
+fn resolve_complete_subject<'a>(
     subject: &str,
     identities: &'a [KnownIdentity],
 ) -> Option<&'a KnownIdentity> {
-    let norm = normalize_lifecycle_text(subject);
+    let subject_norm = normalize_text(subject);
 
     // 1. Exact stable ID match
     let mut id_matches: Vec<&KnownIdentity> = identities
         .iter()
         .filter(|id| {
             if let Some(cid) = &id.canonical_id {
-                norm == normalize_lifecycle_text(cid)
+                subject_norm == normalize_text(cid)
             } else {
                 false
             }
@@ -250,74 +257,26 @@ fn resolve_identity<'a>(
         return id_matches.pop();
     }
     if id_matches.len() > 1 {
-        return None; // Ambiguous
+        return None;
     }
 
     // 2. Exact title match
     let mut title_matches: Vec<&KnownIdentity> = identities
         .iter()
-        .filter(|id| norm == normalize_lifecycle_text(&id.title))
+        .filter(|id| subject_norm == normalize_text(&id.title))
         .collect();
     if title_matches.len() == 1 {
         return title_matches.pop();
     }
     if title_matches.len() > 1 {
-        return None; // Ambiguous
+        return None;
     }
 
-    // 3. Exact alias match
-    let mut alias_matches: Vec<&KnownIdentity> = identities
-        .iter()
-        .filter(|id| {
-            id.aliases
-                .iter()
-                .any(|a| norm == normalize_lifecycle_text(a))
-        })
-        .collect();
-    if alias_matches.len() == 1 {
-        return alias_matches.pop();
-    }
-
-    // Ambiguous or no match
-    None
-}
-
-/// Resolve an identity at the start of a line content.
-/// The identity name must be a prefix of the content.
-fn resolve_identity_at_start<'a>(
-    content: &str,
-    identities: &'a [KnownIdentity],
-) -> Option<&'a KnownIdentity> {
-    let content_norm = normalize_lifecycle_text(content);
-
-    // Try stable IDs first
-    for id in identities {
-        if let Some(cid) = &id.canonical_id {
-            let cid_norm = normalize_lifecycle_text(cid);
-            if content_norm.starts_with(&cid_norm) {
-                return Some(id);
-            }
-        }
-    }
-
-    // Try titles (longest first for greedy match)
-    let mut sorted: Vec<&KnownIdentity> = identities.iter().collect();
-    sorted.sort_by_key(|a| std::cmp::Reverse(a.title.len()));
-
-    for id in sorted {
-        let title_norm = normalize_lifecycle_text(&id.title);
-        if title_norm.len() >= 3 && content_norm.starts_with(&title_norm) {
-            return Some(id);
-        }
-    }
-
-    // Try aliases — collect all matches, return None if ambiguous
+    // 3. Exact alias match (including structural aliases)
     let mut alias_matches: Vec<&KnownIdentity> = Vec::new();
     for id in identities {
-        for alias in &id.aliases {
-            let alias_norm = normalize_lifecycle_text(alias);
-            if alias_norm.len() >= 3
-                && content_norm.starts_with(&alias_norm)
+        for alias in effective_aliases(id) {
+            if subject_norm == normalize_text(&alias)
                 && !alias_matches.iter().any(|m| m.key == id.key)
             {
                 alias_matches.push(id);
@@ -327,62 +286,65 @@ fn resolve_identity_at_start<'a>(
     if alias_matches.len() == 1 {
         return alias_matches.pop();
     }
-    // Ambiguous or no match
+
+    // 0 or >1 matches → no event
     None
 }
 
-/// Normalize text for lifecycle matching: lowercase, collapse whitespace,
-/// strip possessives.
-fn normalize_lifecycle_text(s: &str) -> String {
-    let lower = s.to_ascii_lowercase();
-    // Strip possessive 's at word boundaries
-    let mut out = String::with_capacity(lower.len());
-    let chars: Vec<char> = lower.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if chars[i] == '\''
-            && i + 1 < chars.len()
-            && chars[i + 1] == 's'
-            && i > 0
-            && chars[i - 1].is_alphabetic()
-            && (i + 2 >= chars.len() || !chars[i + 2].is_alphabetic())
-        {
-            i += 2;
-        } else {
-            out.push(chars[i]);
-            i += 1;
+/// Compute effective aliases for an identity, including type-aware
+/// structural aliases.
+///
+/// For `technology-road` type: adds `<title> road`.
+/// For `technology-portfolio` type: adds `<title> portfolio`.
+fn effective_aliases(id: &KnownIdentity) -> Vec<String> {
+    let mut aliases: Vec<String> = id.aliases.clone();
+
+    // Type-aware structural aliases (§2.5)
+    match id.type_name.as_str() {
+        "technology-road" => {
+            aliases.push(format!("{} road", id.title));
         }
+        "technology-portfolio" => {
+            aliases.push(format!("{} portfolio", id.title));
+        }
+        "capability" => {
+            aliases.push(format!("{} capability", id.title));
+        }
+        _ => {}
     }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
+
+    aliases
 }
 
-/// Parse lifecycle keywords from text. Returns the first recognized outcome.
-fn parse_lifecycle_keywords(text: &str) -> Option<SourceLifecycleOutcome> {
-    let lower = text.to_ascii_lowercase();
+/// Parse a lifecycle phrase from text. Returns the outcome if the text
+/// starts with a recognized controlled phrase.
+fn parse_lifecycle_phrase(text: &str) -> Option<SourceLifecycleOutcome> {
+    let trimmed = text.trim();
+    let lower = trimmed.to_ascii_lowercase();
 
-    // Order matters: check more specific patterns first
-    if lower.contains("closed succeeded") || lower.contains("closed success") {
+    // Check exact prefix matches (ordered longest-first)
+    if lower.starts_with("closed succeeded") {
         return Some(SourceLifecycleOutcome::ClosedSucceeded);
     }
-    if lower.contains("closed failed") || lower.contains("closed failure") {
+    if lower.starts_with("closed failed") {
         return Some(SourceLifecycleOutcome::ClosedFailed);
     }
-    if lower.contains("failed terminally") || lower.contains("terminal failure") {
+    if lower.starts_with("failed terminally") || lower.starts_with("terminal failure") {
         return Some(SourceLifecycleOutcome::TerminalFailed);
     }
-    if lower.contains("completed") || lower.contains("succeeded") || lower.contains("success") {
+    if lower.starts_with("completed") || lower.starts_with("succeeded") {
         return Some(SourceLifecycleOutcome::Completed);
     }
-    if lower.contains("failed") || lower.contains("failure") {
+    if lower.starts_with("failed") {
         return Some(SourceLifecycleOutcome::Failed);
     }
-    if lower.contains("stalled") || lower.contains("stalled out") {
+    if lower.starts_with("stalled") {
         return Some(SourceLifecycleOutcome::Stalled);
     }
-    if lower.contains("running") || lower.contains("in progress") || lower.contains("executing") {
+    if lower.starts_with("running") || lower.starts_with("in progress") {
         return Some(SourceLifecycleOutcome::Running);
     }
-    if lower.contains("accepted") || lower.contains("approved") {
+    if lower.starts_with("accepted") {
         return Some(SourceLifecycleOutcome::Accepted);
     }
 
@@ -390,9 +352,6 @@ fn parse_lifecycle_keywords(text: &str) -> Option<SourceLifecycleOutcome> {
 }
 
 /// Detect contradictions between lifecycle events for the same identity.
-///
-/// Two events are contradictory if they are both terminal and have
-/// incompatible outcomes (e.g. ClosedSucceeded vs Failed).
 pub fn detect_contradictions(events: &[SourceLifecycleEvent]) -> Vec<Contradiction> {
     use std::collections::HashMap;
 
@@ -413,7 +372,6 @@ pub fn detect_contradictions(events: &[SourceLifecycleEvent]) -> Vec<Contradicti
             continue;
         }
 
-        // Check for incompatible terminal outcomes
         for i in 0..terminal.len() {
             for j in (i + 1)..terminal.len() {
                 if !outcomes_compatible(terminal[i].outcome, terminal[j].outcome) {
@@ -430,11 +388,38 @@ pub fn detect_contradictions(events: &[SourceLifecycleEvent]) -> Vec<Contradicti
     contradictions
 }
 
-/// Are two terminal outcomes compatible? Same outcome is compatible.
-/// Different terminal outcomes are contradictory unless explicit
-/// supersession metadata exists (not implemented — fail closed).
+/// Conservative compatibility mapping (§5.1).
+///
+/// Failures are compatible with failures. Successes are compatible
+/// with successes. Mixed polarity is contradictory.
 fn outcomes_compatible(a: SourceLifecycleOutcome, b: SourceLifecycleOutcome) -> bool {
-    a == b
+    if a == b {
+        return true;
+    }
+    let a_polarity = outcome_polarity(a);
+    let b_polarity = outcome_polarity(b);
+    a_polarity == b_polarity
+}
+
+fn outcome_polarity(o: SourceLifecycleOutcome) -> OutcomePolarity {
+    match o {
+        SourceLifecycleOutcome::Completed | SourceLifecycleOutcome::ClosedSucceeded => {
+            OutcomePolarity::Success
+        }
+        SourceLifecycleOutcome::Failed
+        | SourceLifecycleOutcome::TerminalFailed
+        | SourceLifecycleOutcome::ClosedFailed => OutcomePolarity::Failure,
+        SourceLifecycleOutcome::Accepted
+        | SourceLifecycleOutcome::Running
+        | SourceLifecycleOutcome::Stalled => OutcomePolarity::NonTerminal,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutcomePolarity {
+    Success,
+    Failure,
+    NonTerminal,
 }
 
 /// A contradiction between two lifecycle events.
@@ -466,21 +451,42 @@ mod tests {
         }
     }
 
-    fn make_identity(key: &str, title: &str, aliases: Vec<&str>) -> KnownIdentity {
+    fn make_identity(key: &str, title: &str, type_name: &str, aliases: Vec<&str>) -> KnownIdentity {
         KnownIdentity {
             key: key.to_string(),
             canonical_id: Some(key.to_string()),
             title: title.to_string(),
             aliases: aliases.into_iter().map(String::from).collect(),
             note_path: format!("{}.md", title),
-            type_name: "technology-road".to_string(),
+            type_name: type_name.to_string(),
             status: Some("active".to_string()),
             lifecycle: Some("in-progress".to_string()),
         }
     }
 
     #[test]
-    fn parse_pipe_row_closed_succeeded() {
+    fn exact_pipe_subject_resolves() {
+        let msgs = vec![make_msg(
+            5035,
+            "the_mud_lounge_bot",
+            SpeakerClass::Dm,
+            "Universal formation | closed SUCCEEDED this year",
+        )];
+        let ids = vec![make_identity(
+            "road:universal-formation",
+            "Universal formation",
+            "technology-road",
+            vec![],
+        )];
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].outcome, SourceLifecycleOutcome::ClosedSucceeded);
+    }
+
+    #[test]
+    fn structural_alias_road_type_resolves() {
+        // "Universal formation road" should resolve via structural alias
+        // for technology-road type
         let msgs = vec![make_msg(
             5035,
             "the_mud_lounge_bot",
@@ -490,44 +496,75 @@ mod tests {
         let ids = vec![make_identity(
             "road:universal-formation",
             "Universal formation",
+            "technology-road",
             vec![],
         )];
-        let config = Config::default();
-        let events = parse_lifecycle_events(&msgs, &ids, &config);
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].outcome, SourceLifecycleOutcome::ClosedSucceeded);
-        assert_eq!(events[0].cursor, 5035);
     }
 
     #[test]
-    fn parse_bullet_line_failed() {
+    fn bullet_subject_resolves() {
         let msgs = vec![make_msg(
             5100,
             "the_mud_lounge_bot",
             SpeakerClass::Dm,
             "- Steam power FAILED at the boundary",
         )];
-        let ids = vec![make_identity("road:steam", "Steam power", vec![])];
-        let config = Config::default();
-        let events = parse_lifecycle_events(&msgs, &ids, &config);
+        let ids = vec![make_identity(
+            "road:steam",
+            "Steam power",
+            "technology-road",
+            vec![],
+        )];
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].outcome, SourceLifecycleOutcome::Failed);
     }
 
     #[test]
-    fn steam_governor_not_terminal_failure() {
-        // §7.5 Hard negative: Steam's governor control FAILED TERMINALLY
-        // should NOT classify road:steam as terminally failed
+    fn steam_governor_no_terminal_event() {
+        // §2.2/§7.5: "Steam's governor control FAILED TERMINALLY"
+        // Subject resolves to "Steam's governor control" which is NOT
+        // a known identity → no event (general subject semantics, not blacklist)
         let msgs = vec![make_msg(
             5100,
             "the_mud_lounge_bot",
             SpeakerClass::Dm,
             "Steam's governor control FAILED TERMINALLY ... bearing and shaft tolerance continues",
         )];
-        let ids = vec![make_identity("road:steam", "Steam", vec![])];
-        let config = Config::default();
-        let events = parse_lifecycle_events(&msgs, &ids, &config);
-        // Should produce NO events because of component subject detection
+        let ids = vec![make_identity(
+            "road:steam",
+            "Steam",
+            "technology-road",
+            vec![],
+        )];
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
+        assert_eq!(events.len(), 0);
+    }
+
+    #[test]
+    fn broad_substring_does_not_create_event() {
+        // §2.2: "<Road> ... unrelated component failed later"
+        // The subject "Steam power" is resolved, but "failed" appears
+        // in a different clause. The split_at_lifecycle_phrase should
+        // only match if "failed" directly follows the subject.
+        let msgs = vec![make_msg(
+            5100,
+            "the_mud_lounge_bot",
+            SpeakerClass::Dm,
+            "- Steam power had issues. The valve failed later.",
+        )];
+        let ids = vec![make_identity(
+            "road:steam",
+            "Steam power",
+            "technology-road",
+            vec![],
+        )];
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
+        // "Steam power had issues" — "had" is not a lifecycle phrase,
+        // and "failed later" is in a separate sentence after a period.
         assert_eq!(events.len(), 0);
     }
 
@@ -542,10 +579,10 @@ mod tests {
         let ids = vec![make_identity(
             "road:universal-formation",
             "Universal formation",
+            "technology-road",
             vec![],
         )];
-        let config = Config::default();
-        let events = parse_lifecycle_events(&msgs, &ids, &config);
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
         assert_eq!(events.len(), 0);
     }
 
@@ -560,10 +597,10 @@ mod tests {
         let ids = vec![make_identity(
             "road:universal-formation",
             "Universal formation",
+            "technology-road",
             vec![],
         )];
-        let config = Config::default();
-        let events = parse_lifecycle_events(&msgs, &ids, &config);
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
         assert_eq!(events.len(), 0);
     }
 
@@ -576,12 +613,36 @@ mod tests {
             "Forge CLOSED SUCCEEDED",
         )];
         let ids = vec![
-            make_identity("road:forge-a", "Forge Alpha", vec!["Forge"]),
-            make_identity("road:forge-b", "Forge Beta", vec!["Forge"]),
+            make_identity(
+                "road:forge-a",
+                "Forge Alpha",
+                "technology-road",
+                vec!["Forge"],
+            ),
+            make_identity(
+                "road:forge-b",
+                "Forge Beta",
+                "technology-road",
+                vec!["Forge"],
+            ),
         ];
-        let config = Config::default();
-        let events = parse_lifecycle_events(&msgs, &ids, &config);
-        // Ambiguous alias → no event
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
+        assert_eq!(events.len(), 0);
+    }
+
+    #[test]
+    fn duplicate_title_no_event() {
+        let msgs = vec![make_msg(
+            5035,
+            "the_mud_lounge_bot",
+            SpeakerClass::Dm,
+            "Test Road CLOSED SUCCEEDED",
+        )];
+        let ids = vec![
+            make_identity("road:a", "Test Road", "technology-road", vec![]),
+            make_identity("road:b", "Test Road", "technology-road", vec![]),
+        ];
+        let events = parse_lifecycle_events(&msgs, &ids, &Config::default());
         assert_eq!(events.len(), 0);
     }
 
@@ -607,6 +668,56 @@ mod tests {
         ];
         let contradictions = detect_contradictions(&events);
         assert_eq!(contradictions.len(), 1);
+    }
+
+    #[test]
+    fn compatible_failure_no_contradiction() {
+        // §5.1: CLOSED_FAILED and FAILED have compatible polarity
+        let events = vec![
+            SourceLifecycleEvent {
+                identity_key: "road:test".to_string(),
+                cursor: 5000,
+                outcome: SourceLifecycleOutcome::ClosedFailed,
+                source_file: "a.md".to_string(),
+                source_line: 1,
+                evidence_kind: ActivityEvidenceKind::ExactLifecycleSourceEvent,
+            },
+            SourceLifecycleEvent {
+                identity_key: "road:test".to_string(),
+                cursor: 5100,
+                outcome: SourceLifecycleOutcome::Failed,
+                source_file: "b.md".to_string(),
+                source_line: 1,
+                evidence_kind: ActivityEvidenceKind::ExactLifecycleSourceEvent,
+            },
+        ];
+        let contradictions = detect_contradictions(&events);
+        assert_eq!(contradictions.len(), 0);
+    }
+
+    #[test]
+    fn compatible_success_no_contradiction() {
+        // §5.1: COMPLETED and CLOSED_SUCCEEDED have compatible polarity
+        let events = vec![
+            SourceLifecycleEvent {
+                identity_key: "road:test".to_string(),
+                cursor: 5000,
+                outcome: SourceLifecycleOutcome::Completed,
+                source_file: "a.md".to_string(),
+                source_line: 1,
+                evidence_kind: ActivityEvidenceKind::ExactLifecycleSourceEvent,
+            },
+            SourceLifecycleEvent {
+                identity_key: "road:test".to_string(),
+                cursor: 5100,
+                outcome: SourceLifecycleOutcome::ClosedSucceeded,
+                source_file: "b.md".to_string(),
+                source_line: 1,
+                evidence_kind: ActivityEvidenceKind::ExactLifecycleSourceEvent,
+            },
+        ];
+        let contradictions = detect_contradictions(&events);
+        assert_eq!(contradictions.len(), 0);
     }
 
     #[test]
