@@ -151,6 +151,89 @@ impl<'a> FmView<'a> {
     }
 }
 
+/// Controlled vocabulary for `capability_state`.
+pub const VALID_CAPABILITY_STATES: &[&str] = &[
+    "attained",
+    "reproduced",
+    "diffused",
+    "exploited",
+    "compounded",
+    "superseded",
+    "lost",
+];
+
+/// Result of parsing `capability_state` from frontmatter.
+#[derive(Debug, Clone)]
+pub struct ParsedCapabilityState {
+    /// Valid states from the controlled vocabulary.
+    pub valid: Vec<&'static str>,
+    /// Invalid states not in the controlled vocabulary.
+    pub invalid: Vec<String>,
+    /// Whether the field was present at all.
+    pub field_present: bool,
+}
+
+/// Parse `capability_state` from frontmatter. Supports both YAML list and
+/// scalar backwards-compat. Returns valid states, invalid states, and
+/// whether the field was present.
+pub fn parse_capability_states(fm: &FmView<'_>) -> ParsedCapabilityState {
+    let items = fm.get_list("capability_state");
+    if items.is_empty() {
+        if let Some(raw) = fm.get_str("capability_state") {
+            let trimmed = raw.trim().to_ascii_lowercase();
+            if trimmed.is_empty() {
+                return ParsedCapabilityState {
+                    valid: Vec::new(),
+                    invalid: Vec::new(),
+                    field_present: false,
+                };
+            }
+            let mut valid = Vec::new();
+            let mut invalid = Vec::new();
+            if let Some(&v) = VALID_CAPABILITY_STATES
+                .iter()
+                .find(|v| v.eq_ignore_ascii_case(&trimmed))
+            {
+                valid.push(v);
+            } else {
+                invalid.push(trimmed);
+            }
+            return ParsedCapabilityState {
+                valid,
+                invalid,
+                field_present: true,
+            };
+        }
+        return ParsedCapabilityState {
+            valid: Vec::new(),
+            invalid: Vec::new(),
+            field_present: false,
+        };
+    }
+    let mut valid = Vec::new();
+    let mut invalid = Vec::new();
+    for item in &items {
+        let trimmed = item.trim().to_ascii_lowercase();
+        if let Some(&v) = VALID_CAPABILITY_STATES
+            .iter()
+            .find(|v| v.eq_ignore_ascii_case(&trimmed))
+        {
+            if !valid.contains(&v) {
+                valid.push(v);
+            }
+        } else {
+            if !invalid.contains(&trimmed) {
+                invalid.push(trimmed);
+            }
+        }
+    }
+    ParsedCapabilityState {
+        valid,
+        invalid,
+        field_present: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

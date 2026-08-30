@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use crate::boundary::{diagnose_source_frontiers, SourceFrontierRelationship, StateBoundary};
 use crate::config::Config;
 use crate::findings::Findings;
+use crate::frontmatter::parse_capability_states;
 use crate::gaps;
 use crate::source_index::{resolve_cursor, SourceIndex};
 use crate::vault::VaultIndex;
@@ -50,23 +51,27 @@ pub fn render(
     render_technology_coverage(&mut out, source_index, config);
 
     // Top Actionable Reconciliation Queue
-    let classified = gaps::classify_gaps(findings, source_index, boundary);
+    let resurfacing = project_resurfacing(source_index, config, vault_index);
+    let mut classified = gaps::classify_gaps(findings, source_index, boundary, vault_index);
+    classified.extend(resurfacing.iter().map(resurfacing_gap));
+    classified.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+
     render_actionable_queue(&mut out, &classified, config);
 
     // Technology Progress (§10)
-    render_technology_progress(&mut out, source_index, config, vault_index);
+    render_technology_progress(&mut out, source_index, config, vault_index, boundary);
 
     // Capability Progress & Reuse (§11-13)
-    render_capability_progress(&mut out, source_index, config, vault_index);
+    render_capability_progress(&mut out, source_index, config, vault_index, boundary);
 
     // Resurfacing Candidates
-    render_resurfacing(&mut out, source_index, config, vault_index);
+    render_resurfacing(&mut out, source_index, config, &resurfacing);
 
     // Owed Technology Receipts
     render_receipts(&mut out, source_index, config);
 
     // Capabilities With No Machine-Linked Downstream Use Evidence
-    render_capabilities(&mut out, source_index, config);
+    render_capabilities(&mut out, source_index, config, vault_index);
 
     // Coverage Candidates
     render_coverage(&mut out, source_index, config);
@@ -204,6 +209,19 @@ fn render_actionable_queue(out: &mut String, classified: &[gaps::GapCandidate], 
     }
 
     out.push('\n');
+
+    out.push_str("### Deterministic Action Prompts\n\n");
+    let mut rendered = 0usize;
+    for gap in &queue.queue {
+        if let Some(prompt) = gaps::render_prompt(gap) {
+            out.push_str(&prompt);
+            out.push('\n');
+            rendered += 1;
+        }
+    }
+    if rendered == 0 {
+        out.push_str("No bounded materialization, authority, or contradiction prompts.\n\n");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,16 +230,21 @@ fn render_actionable_queue(out: &mut String, classified: &[gaps::GapCandidate], 
 
 fn render_technology_progress(
     out: &mut String,
-    source_index: &SourceIndex,
+    _source_index: &SourceIndex,
     config: &Config,
     vault_index: &VaultIndex,
+    boundary: &StateBoundary,
 ) {
     out.push_str("## Technology Progress\n\n");
 
-    // Count roads by lifecycle status
+    // Count roads by canonical high-level status. Lifecycle refines only the
+    // closed/partial bucket; composite lifecycle strings never hide activity.
     let mut lifecycle_counts: std::collections::BTreeMap<&str, usize> =
         std::collections::BTreeMap::new();
-    let mut terminal_with_year: Vec<(i64, String)> = Vec::new();
+    let mut terminal_with_year: Vec<(i64, String, &'static str)> = Vec::new();
+    let mut upcoming_due: Vec<(i64, String)> = Vec::new();
+    let mut terminal_total = 0usize;
+    let mut terminal_unknown_year = 0usize;
 
     for note in &vault_index.notes {
         if !note.curated || note.parse_error.is_some() {
@@ -235,49 +258,49 @@ fn render_technology_progress(
         let lifecycle = fm.get_str("lifecycle").unwrap_or_default();
         let status = note.status().unwrap_or_default();
 
-        // Determine effective lifecycle
-        let effective = if lifecycle.is_empty() {
-            status.as_str()
-        } else {
-            lifecycle.as_str()
-        };
-
-        let bucket = match effective {
-            "accepted" => "accepted",
-            "executing" | "in-progress" | "progress" => "active",
+        let bucket = match status.as_str() {
+            "active" | "accepted" | "in-progress" => "active",
             "stalled" => "stalled",
             "completed" => "completed",
             "failed" => "failed",
-            "closed" => "closed",
+            "closed" if lifecycle.contains("partial") => "closed/partial",
+            "closed" => "closed/partial",
             "superseded" => "superseded",
-            "terminal" => "terminal",
-            _ => "other",
+            _ => "unknown",
         };
         *lifecycle_counts.entry(bucket).or_insert(0) += 1;
 
-        // Track terminal records with deterministic year resolution
+        if matches!(bucket, "active" | "stalled") {
+            if let Some(year) = fm.get_i64("terminal_due_year") {
+                upcoming_due.push((
+                    year,
+                    fm.get_str("road_id")
+                        .unwrap_or_else(|| note.title().to_string()),
+                ));
+            }
+        }
+
         if matches!(
-            effective,
-            "completed" | "failed" | "closed" | "superseded" | "terminal"
+            bucket,
+            "completed" | "failed" | "closed/partial" | "superseded"
         ) {
+            terminal_total += 1;
             // Try to resolve terminal year from frontmatter fields
             let terminal_year = fm
-                .get_i64("completed_year")
-                .or_else(|| fm.get_i64("terminal_result_year"))
+                .get_i64("terminal_year")
+                .or_else(|| fm.get_i64("completed_year"))
                 .or_else(|| fm.get_i64("closed_year"))
-                .or_else(|| {
-                    // Try cursor epoch resolution for terminal_result_cursor
-                    fm.get_i64("terminal_result_cursor").and_then(|c| {
-                        source_index
-                            .cursor_epochs
-                            .iter()
-                            .rev()
-                            .find(|e| c >= e.cursor_start && c <= e.cursor_end)
-                            .and_then(|e| e.year)
-                    })
-                });
+                // Existing exact semantic field retained for compatibility.
+                .or_else(|| fm.get_i64("terminal_result_year"));
+            let outcome = match bucket {
+                "completed" => "success",
+                "failed" => "failure",
+                _ => "other",
+            };
             if let Some(year) = terminal_year {
-                terminal_with_year.push((year, fm.get_str("road_id").unwrap_or_default()));
+                terminal_with_year.push((year, fm.get_str("road_id").unwrap_or_default(), outcome));
+            } else {
+                terminal_unknown_year += 1;
             }
         }
     }
@@ -295,12 +318,12 @@ fn render_technology_progress(
 
     // Upcoming terminal years
     out.push_str("### Upcoming Terminal Years\n\n");
-    if let Some(current_year) = boundary_current_year(source_index) {
-        let mut upcoming: Vec<_> = terminal_with_year
+    if let Some(current_year) = boundary.current_year {
+        let mut upcoming: Vec<_> = upcoming_due
             .iter()
             .filter(|(y, _)| *y >= current_year)
             .collect();
-        upcoming.sort_by_key(|(y, _)| *y);
+        upcoming.sort_by_key(|(y, id)| (*y, id.as_str()));
         if upcoming.is_empty() {
             out.push_str("No upcoming terminal years within indexed records.\n\n");
         } else {
@@ -316,7 +339,7 @@ fn render_technology_progress(
 
     // Rolling windows (conservative: only count when year is deterministic)
     out.push_str("### Rolling Windows (deterministic year only)\n\n");
-    if let Some(current_year) = boundary_current_year(source_index) {
+    if let Some(current_year) = boundary.last_resolved_year {
         let windows = [1, 3, 5];
         // Collect accepted-by-year and terminal-by-year
         let mut accepted_by_year: std::collections::BTreeMap<i64, usize> =
@@ -340,28 +363,40 @@ fn render_technology_progress(
             let accepted: usize = (start..=current_year)
                 .map(|y| accepted_by_year.get(&y).copied().unwrap_or(0))
                 .sum();
-            let completed: usize = terminal_with_year
+            let successes: usize = terminal_with_year
                 .iter()
-                .filter(|(y, _)| *y >= start && *y <= current_year)
+                .filter(|(y, _, outcome)| {
+                    *y >= start && *y <= current_year && *outcome == "success"
+                })
+                .count();
+            let failures = terminal_with_year
+                .iter()
+                .filter(|(y, _, outcome)| {
+                    *y >= start && *y <= current_year && *outcome == "failure"
+                })
+                .count();
+            let other = terminal_with_year
+                .iter()
+                .filter(|(y, _, outcome)| *y >= start && *y <= current_year && *outcome == "other")
                 .count();
             out.push_str(&format!(
                 "- last {window} resolved year(s) ({start}–{current_year}): \
-                 {accepted} accepted, {completed} terminally completed/failed\n"
+                  {accepted} accepted, {successes} terminal successes, {failures} terminal failures, {other} terminal other\n"
             ));
         }
     } else {
         out.push_str("Current year unknown — rolling windows unavailable.\n");
     }
     out.push('\n');
+    out.push_str(&format!(
+        "- terminal-year coverage: {} / {terminal_total} known\n- terminal year unknown: {terminal_unknown_year}\n\n",
+        terminal_total.saturating_sub(terminal_unknown_year)
+    ));
 
     // Capacity-release: UNSUPPORTED (§14)
     out.push_str("### Capacity-Release Telemetry\n\n");
     out.push_str("capacity-release semantic telemetry: UNSUPPORTED\n");
     out.push_str("capacity-reinvestment semantic telemetry: UNSUPPORTED\n\n");
-}
-
-fn boundary_current_year(source_index: &SourceIndex) -> Option<i64> {
-    source_index.cursor_epochs.last().and_then(|e| e.year)
 }
 
 // ---------------------------------------------------------------------------
@@ -370,25 +405,24 @@ fn boundary_current_year(source_index: &SourceIndex) -> Option<i64> {
 
 fn render_capability_progress(
     out: &mut String,
-    source_index: &SourceIndex,
+    _source_index: &SourceIndex,
     config: &Config,
     vault_index: &VaultIndex,
+    boundary: &StateBoundary,
 ) {
     out.push_str("## Capability Progress\n\n");
 
-    let mut total_capabilities = 0usize;
+    let active_capability_ids_set = active_capability_ids(config, vault_index);
+    let total_capabilities = active_capability_ids_set.len();
     let mut state_represented = 0usize;
     let mut attainment_year_represented = 0usize;
     let mut attainment_cursor_represented = 0usize;
     let mut depth_represented = 0usize;
-    let mut attained_count = 0usize;
+    let mut state_counts: std::collections::BTreeMap<&str, usize> =
+        std::collections::BTreeMap::new();
     let mut attained_with_year: Vec<i64> = Vec::new();
 
-    // Reuse metrics
-    let mut roads_with_prereq = 0usize;
-    let mut roads_with_cheapener = 0usize;
-    let mut total_reuse_edges = 0usize;
-    let mut capabilities_with_use = std::collections::HashSet::new();
+    let reuse = build_reuse_projection(config, vault_index, &active_capability_ids_set);
 
     for note in &vault_index.notes {
         if !note.curated || note.parse_error.is_some() {
@@ -398,16 +432,26 @@ fn render_capability_progress(
         if !config.capability_types.contains(&type_name) {
             continue;
         }
-        total_capabilities += 1;
         let fm = note.fm();
+        let cap_id = fm.get_str("capability_id").unwrap_or_default();
+        if !active_capability_ids_set.contains(cap_id.trim()) {
+            continue;
+        }
+        let parsed_state = parse_capability_states(&fm);
+        let has_state_field = parsed_state.field_present;
 
-        // Capability-state represented
-        if fm.get_str("capability_state").is_some() {
+        // Capability-state represented: field exists with at least one valid value
+        if has_state_field && !parsed_state.valid.is_empty() {
             state_represented += 1;
         }
 
         // Attainment year
-        if fm.get_i64("attained_year").is_some() {
+        if fm.get_i64("attained_year").is_some()
+            && parsed_state
+                .valid
+                .iter()
+                .any(|s| matches!(*s, "attained" | "reproduced" | "diffused"))
+        {
             attainment_year_represented += 1;
             if let Some(y) = fm.get_i64("attained_year") {
                 attained_with_year.push(y);
@@ -424,65 +468,34 @@ fn render_capability_progress(
             depth_represented += 1;
         }
 
-        // Attained check
-        let lifecycle = fm.get_str("lifecycle").unwrap_or_default();
-        let cap_state = fm.get_str("capability_state").unwrap_or_default();
-        let is_attained = lifecycle.starts_with("attained")
-            || cap_state == "attained"
-            || lifecycle == "reproduced"
-            || lifecycle == "diffused";
-        if is_attained {
-            attained_count += 1;
+        for state in &parsed_state.valid {
+            *state_counts.entry(*state).or_insert(0) += 1;
         }
     }
-
-    // Reuse edges from roads
-    for note in &vault_index.notes {
-        if !note.curated || note.parse_error.is_some() {
-            continue;
-        }
-        let type_name = note.type_str().unwrap_or_default();
-        if !config.road_types.contains(&type_name) {
-            continue;
-        }
-        let fm = note.fm();
-
-        let requires: Vec<String> = fm.get_list("requires");
-        let cheapened: Vec<String> = fm.get_list("cheapened_by");
-
-        if !requires.is_empty() {
-            roads_with_prereq += 1;
-            for cap in &requires {
-                let clean = cap.trim().to_string();
-                if !clean.is_empty() {
-                    total_reuse_edges += 1;
-                    capabilities_with_use.insert(clean.clone());
-                }
-            }
-        }
-        if !cheapened.is_empty() {
-            roads_with_cheapener += 1;
-            for cap in &cheapened {
-                let clean = cap.trim().to_string();
-                if !clean.is_empty() {
-                    total_reuse_edges += 1;
-                    capabilities_with_use.insert(clean);
-                }
-            }
-        }
-    }
-
-    let capabilities_reused_by_roads = capabilities_with_use.len();
 
     // Render capability representation denominators
     out.push_str("### Capability Representation\n\n");
     out.push_str(&format!(
-        "- machine-readable durable capability owners: {total_capabilities}\n"
+        "- active machine-readable durable capability owners: {total_capabilities}\n"
     ));
     if total_capabilities > 0 {
         out.push_str(&format!(
             "- capability-state represented: {state_represented}/{total_capabilities}\n"
         ));
+        for state in [
+            "attained",
+            "reproduced",
+            "diffused",
+            "exploited",
+            "compounded",
+            "superseded",
+            "lost",
+        ] {
+            out.push_str(&format!(
+                "- capability state {state}: {}\n",
+                state_counts.get(state).copied().unwrap_or(0)
+            ));
+        }
         out.push_str(&format!(
             "- attainment year represented: {attainment_year_represented}/{total_capabilities}\n"
         ));
@@ -497,7 +510,7 @@ fn render_capability_progress(
 
     // Rolling windows for attained capabilities
     out.push_str("### Newly Attained Capabilities\n\n");
-    if let Some(current_year) = boundary_current_year(source_index) {
+    if let Some(current_year) = boundary.last_resolved_year {
         let windows = [1, 3, 5];
         for &window in &windows {
             let start = current_year - window + 1;
@@ -518,35 +531,45 @@ fn render_capability_progress(
     out.push_str("### Machine-Linked Downstream Reuse\n\n");
     if total_capabilities > 0 {
         out.push_str(&format!(
-            "- attained capabilities represented: {attained_count}\n"
+            "- active durable capabilities (nonempty IDs; excluding lost/superseded): {total_capabilities}\n"
         ));
         out.push_str(&format!(
-            "- capabilities explicitly reused by later roads: {capabilities_reused_by_roads}\n"
+            "- capabilities with resolved machine-linked dependency/reuse edges: {}\n",
+            reuse.capabilities_with_use.len()
         ));
         out.push_str(&format!(
-            "- roads accepted with >=1 explicit capability prerequisite: {roads_with_prereq}\n"
+            "- roads with >=1 resolved `requires` capability edge: {}\n",
+            reuse.roads_with_requires
         ));
         out.push_str(&format!(
-            "- roads explicitly cheapened by prior capabilities: {roads_with_cheapener}\n"
+            "- roads with >=1 resolved `cheapened_by` capability edge: {}\n",
+            reuse.roads_with_cheapener
         ));
         out.push_str(&format!(
-            "- total explicit capability→road reuse edges: {total_reuse_edges}\n"
+            "- machine-linked capability→road dependency/reuse edges: {}\n",
+            reuse.edge_count
         ));
-        let no_reuse = total_capabilities.saturating_sub(capabilities_reused_by_roads);
+        // R ⊆ A invariant: build_reuse_projection intersects with active_ids
+        debug_assert!(
+            reuse.capabilities_with_use.len() <= total_capabilities,
+            "reuse set must be subset of active set"
+        );
+        let no_reuse = total_capabilities - reuse.capabilities_with_use.len();
         out.push_str(&format!(
-            "- capabilities with no machine-linked downstream reuse: {no_reuse}\n"
+            "- active durable capabilities with no resolved downstream reuse: {no_reuse}\n"
         ));
     } else {
         out.push_str("No machine-readable capability records indexed.\n");
     }
     out.push('\n');
 
-    // Narrative semantic-use coverage: UNSUPPORTED
     out.push_str(
-        "> Narrative semantic-use coverage: **UNSUPPORTED**. \
-     Deterministic machine-linked reuse detection is limited to explicit \
-     structured edges (requires, cheapened_by, produces). Narrative prose \
-     describing capability use cannot be reliably parsed.\n\n",
+        "> Resolved downstream reuse is counted only from explicit structured \
+     `requires` and `cheapened_by` edges.\n\n",
+    );
+    out.push_str(
+        "> Narrative semantic-use coverage: UNSUPPORTED. \
+     This does not prove the capability was unused in-world.\n\n",
     );
 }
 
@@ -588,7 +611,14 @@ fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _con
         out.push_str(&format!(
             "Receipt-boundary coverage:\n{road_count} / {road_count} machine-readable road owners evaluated.\n\n"
         ));
-        out.push_str("Structured direct-source receipt events recognized:\n0.\n\n");
+        out.push_str(&format!(
+            "structured direct-source receipts recognized: {}\n\n",
+            source_index.receipts.len()
+        ));
+        out.push_str(&format!(
+            "exact lifecycle events recognized: {}\n\n",
+            source_index.lifecycle_events.len()
+        ));
         out.push_str("Narrative direct-source receipt semantic coverage:\nUNSUPPORTED.\n\n");
     } else if legacy_node_count > 0 || active_legacy_portfolios > 0 {
         out.push_str(&format!(
@@ -612,12 +642,11 @@ fn render_technology_coverage(out: &mut String, source_index: &SourceIndex, _con
     }
 }
 
-fn render_resurfacing(
-    out: &mut String,
+fn project_resurfacing(
     source_index: &SourceIndex,
     config: &Config,
     vault_index: &VaultIndex,
-) {
+) -> Vec<ResurfacingCandidate> {
     // Build resurfacing candidates: tracked entities exceeding dormancy threshold.
     // Exclude deceased/closed/historical/completed/superseded entities from
     // strategy resurfacing (activity data is preserved, just not presented).
@@ -638,7 +667,6 @@ fn render_resurfacing(
     let frontier = source_index.max_source_cursor;
 
     let mut candidates: Vec<ResurfacingCandidate> = Vec::new();
-    let mut excluded_terminal = 0usize;
 
     for identity in &source_index.identities {
         // Check if entity is in a terminal state
@@ -659,7 +687,6 @@ fn render_resurfacing(
                 .unwrap_or(false);
 
         if is_terminal {
-            excluded_terminal += 1;
             continue;
         }
 
@@ -683,11 +710,11 @@ fn render_resurfacing(
 
         // Cursor deltas relative to frontier
         let mention_delta = match (frontier, last_mentioned) {
-            (Some(f), Some(m)) => Some(f - m),
+            (Some(f), Some(m)) if f >= m => Some(f - m),
             _ => None,
         };
         let material_delta = match (frontier, last_material) {
-            (Some(f), Some(m)) => Some(f - m),
+            (Some(f), Some(m)) if f >= m => Some(f - m),
             _ => None,
         };
 
@@ -760,8 +787,15 @@ fn render_resurfacing(
                 canonical_source_cursor,
                 reviewed_through_cursor,
                 last_mentioned_year,
+                last_mentioned_cursor: last_mentioned,
+                last_mentioned_method: activity
+                    .and_then(|a| a.last_mentioned_source.as_ref())
+                    .map(|s| s.kind.label().to_string()),
                 last_material_cursor: last_material,
                 last_material_year,
+                last_material_method: activity
+                    .and_then(|a| a.last_material_source.as_ref())
+                    .map(|s| s.kind.label().to_string()),
                 frontier,
                 mention_delta,
                 material_delta,
@@ -785,6 +819,88 @@ fn render_resurfacing(
             .then_with(|| a.stable_id.cmp(&b.stable_id))
     });
 
+    candidates
+}
+
+fn resurfacing_gap(candidate: &ResurfacingCandidate) -> gaps::GapCandidate {
+    gaps::GapCandidate {
+        kind: gaps::GapKind::ResurfacingCandidate,
+        source_rule: None,
+        stable_id: Some(candidate.stable_id.clone()),
+        title: candidate.title.clone(),
+        record_path: Some(std::path::PathBuf::from(&candidate.record_path)),
+        record_type: Some(candidate.type_name.clone()),
+        canonical_status: candidate.status.clone(),
+        canonical_lifecycle: candidate.lifecycle.clone(),
+        canonical_source_cursor: candidate.canonical_source_cursor,
+        reviewed_through_cursor: candidate.reviewed_through_cursor,
+        evidence_cursor: candidate
+            .last_material_cursor
+            .or(candidate.last_mentioned_cursor),
+        evidence_kind: None,
+        evidence_path: None,
+        evidence_line: None,
+        evidence: Vec::new(),
+        accepted_year: None,
+        acceptance_cursor: None,
+        started_cursor: None,
+        last_progress_cursor: None,
+        last_progress_year: None,
+        due_year: None,
+        exact_fields_owed: Vec::new(),
+        current_source_frontier: candidate.frontier,
+        cursor_delta: candidate.material_delta.or(candidate.mention_delta),
+        reason_code: candidate.dormancy.clone(),
+        recommended_operation: gaps::RecommendedOperation::PlayOrResearchResurfacing,
+        sort_key: (
+            gaps::action_priority(
+                gaps::GapKind::ResurfacingCandidate,
+                None,
+                &candidate.dormancy,
+                None,
+                None,
+            ),
+            -candidate
+                .material_delta
+                .or(candidate.mention_delta)
+                .unwrap_or(0),
+            0,
+            candidate.stable_id.clone(),
+            candidate.record_path.clone(),
+        ),
+    }
+}
+
+fn render_resurfacing(
+    out: &mut String,
+    source_index: &SourceIndex,
+    config: &Config,
+    candidates: &[ResurfacingCandidate],
+) {
+    let terminal_statuses: HashSet<&str> = [
+        "deceased",
+        "closed",
+        "completed",
+        "superseded",
+        "historical",
+        "deprecated",
+        "missing",
+        "not-applicable",
+    ]
+    .iter()
+    .copied()
+    .collect();
+    let excluded_terminal = source_index
+        .identities
+        .iter()
+        .filter(|identity| {
+            identity
+                .status
+                .as_deref()
+                .map(|s| terminal_statuses.contains(s))
+                .unwrap_or(false)
+        })
+        .count();
     let total = candidates.len();
     let shown = candidates.len().min(config.max_resurfacing);
     let tracked_total = source_index.identities.len();
@@ -800,12 +916,10 @@ fn render_resurfacing(
         return;
     }
 
-    out.push_str("| Stable ID | Entity | Type | Status | Lifecycle | Canonical Cursor | Reviewed Cursor | Last Mention | Last Material | Frontier | Mention Δ | Material Δ | Reason | Record |\n");
+    out.push_str("| Stable ID | Entity | Type | Status | Lifecycle | Canonical Cursor | Reviewed Cursor | Last Mention Cursor | Last Material Cursor | Frontier | Mention Δ | Material Δ | Reason | Record |\n");
     out.push_str("|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---|---|---|\n");
 
     for c in candidates.iter().take(shown) {
-        let last_material_display =
-            format_material_cursor(c.last_material_cursor, c.last_material_year);
         out.push_str(&format!(
             "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | `{}` |\n",
             c.stable_id,
@@ -815,8 +929,16 @@ fn render_resurfacing(
             c.lifecycle.as_deref().unwrap_or("—"),
             opt_i64(c.canonical_source_cursor),
             opt_i64(c.reviewed_through_cursor),
-            opt_i64(c.last_mentioned_year),
-            last_material_display,
+            format_cursor_method(
+                c.last_mentioned_cursor,
+                c.last_mentioned_year,
+                c.last_mentioned_method.as_deref()
+            ),
+            format_cursor_method(
+                c.last_material_cursor,
+                c.last_material_year,
+                c.last_material_method.as_deref()
+            ),
             opt_i64(c.frontier),
             opt_i64(c.mention_delta),
             opt_i64(c.material_delta),
@@ -943,29 +1065,68 @@ fn render_receipts(out: &mut String, source_index: &SourceIndex, config: &Config
     out.push('\n');
 }
 
-fn render_capabilities(out: &mut String, source_index: &SourceIndex, config: &Config) {
-    let mut dormant: Vec<CapabilityDormant> = Vec::new();
-    let mut total_capabilities = 0usize;
+fn active_capability_ids(config: &Config, vault_index: &VaultIndex) -> HashSet<String> {
+    vault_index
+        .notes
+        .iter()
+        .filter(|n| {
+            n.curated
+                && n.parse_error.is_none()
+                && config
+                    .capability_types
+                    .contains(&n.type_str().unwrap_or_default())
+        })
+        .filter(|n| matches!(n.status().as_deref(), Some("active")))
+        .filter(|n| {
+            // Exclude capabilities with terminal states that conflict with
+            // active status (lost or superseded).
+            let parsed_state = crate::frontmatter::parse_capability_states(&n.fm());
+            !parsed_state.valid.contains(&"lost") && !parsed_state.valid.contains(&"superseded")
+        })
+        .filter_map(|n| {
+            n.fm()
+                .get_str("capability_id")
+                .map(|id| id.trim().to_string())
+        })
+        .filter(|id| !id.is_empty())
+        .collect()
+}
 
-    for identity in &source_index.identities {
-        if !config.capability_types.contains(&identity.type_name) {
+fn render_capabilities(
+    out: &mut String,
+    _source_index: &SourceIndex,
+    config: &Config,
+    vault_index: &VaultIndex,
+) {
+    let mut dormant: Vec<CapabilityDormant> = Vec::new();
+    let active_set = active_capability_ids(config, vault_index);
+    let reuse = build_reuse_projection(config, vault_index, &active_set);
+    let total_capabilities = active_set.len();
+    for note in &vault_index.notes {
+        if !note.curated
+            || note.parse_error.is_some()
+            || !config
+                .capability_types
+                .contains(&note.type_str().unwrap_or_default())
+        {
             continue;
         }
-        total_capabilities += 1;
-
-        let activity = source_index.activity.get(&identity.key);
-        let has_use = activity
-            .as_ref()
-            .map(|a| a.last_evidenced_use_cursor.is_some() || a.mention_count > 0)
-            .unwrap_or(false);
-
-        if !has_use {
+        let cap_id = note
+            .fm()
+            .get_str("capability_id")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !active_set.contains(&cap_id) {
+            continue;
+        }
+        if !reuse.capabilities_with_use.contains(&cap_id) {
             dormant.push(CapabilityDormant {
-                title: identity.title.clone(),
-                depth: None,
-                last_evidenced_use: activity.and_then(|a| a.last_evidenced_use_cursor),
-                use_classes: String::new(),
-                record_path: identity.note_path.clone(),
+                title: note.title().to_string(),
+                capability_id: cap_id,
+                depth: note.fm().get_str("depth"),
+                edge_count: 0,
+                record_path: note.path.clone(),
             });
         }
     }
@@ -975,7 +1136,7 @@ fn render_capabilities(out: &mut String, source_index: &SourceIndex, config: &Co
 
     out.push_str("## Capabilities With No Machine-Linked Downstream Use Evidence\n\n");
     out.push_str(&format!(
-        "Machine-readable durable capability owners: {total_capabilities}\n\n"
+        "Active durable capability owners (nonempty IDs; excluding lost/superseded): {total_capabilities}\n\n"
     ));
 
     if total_capabilities == 0 {
@@ -994,27 +1155,25 @@ fn render_capabilities(out: &mut String, source_index: &SourceIndex, config: &Co
     }
 
     out.push_str(&format!(
-        "**{total}** of {total_capabilities} capabilities have no deterministic \
+        "**{total}** of {total_capabilities} active durable capabilities have no deterministic \
          machine-linked downstream-use evidence in indexed source:\n\n"
     ));
     out.push_str(
-        "> No deterministic machine-linked downstream-use evidence was located. \
-     This MUST NOT imply the capability was truly unused in the world.\n\n",
+        "> No machine-linked downstream reuse edge is represented in the canonical structured graph. \
+     Narrative semantic-use coverage is unsupported. This MUST NOT imply the capability was truly unused in the world.\n\n",
     );
-    out.push_str("| Capability | Depth | Last Evidenced Use | Evidence Types | Record |\n");
-    out.push_str("|---|---|---:|---|---|\n");
+    out.push_str(
+        "| Capability ID | Capability | Depth | Resolved downstream edge count | Record |\n",
+    );
+    out.push_str("|---|---|---|---:|---|\n");
 
     for d in dormant.iter().take(shown) {
         out.push_str(&format!(
             "| {} | {} | {} | {} | `{}` |\n",
+            d.capability_id,
             d.title,
             d.depth.as_deref().unwrap_or("—"),
-            opt_i64(d.last_evidenced_use),
-            if d.use_classes.is_empty() {
-                "none".to_string()
-            } else {
-                d.use_classes.clone()
-            },
+            d.edge_count,
             d.record_path,
         ));
     }
@@ -1023,6 +1182,48 @@ fn render_capabilities(out: &mut String, source_index: &SourceIndex, config: &Co
         out.push_str(&format!("\nShowing {shown} of {total}.\n"));
     }
     out.push('\n');
+}
+
+#[derive(Default)]
+struct CapabilityReuseProjection {
+    capabilities_with_use: HashSet<String>,
+    edge_count: usize,
+    roads_with_requires: usize,
+    roads_with_cheapener: usize,
+}
+
+fn build_reuse_projection(
+    config: &Config,
+    vault_index: &VaultIndex,
+    active_ids: &HashSet<String>,
+) -> CapabilityReuseProjection {
+    let mut projection = CapabilityReuseProjection::default();
+    for note in vault_index.notes.iter().filter(|n| {
+        n.curated
+            && n.parse_error.is_none()
+            && config
+                .road_types
+                .contains(&n.type_str().unwrap_or_default())
+    }) {
+        let mut requires = false;
+        let mut cheapener = false;
+        for (field, flag) in [
+            ("requires", &mut requires),
+            ("cheapened_by", &mut cheapener),
+        ] {
+            for value in note.fm().get_list(field) {
+                let id = value.trim();
+                if active_ids.contains(id) {
+                    projection.edge_count += 1;
+                    projection.capabilities_with_use.insert(id.to_string());
+                    *flag = true;
+                }
+            }
+        }
+        projection.roads_with_requires += usize::from(requires);
+        projection.roads_with_cheapener += usize::from(cheapener);
+    }
+    projection
 }
 
 fn render_coverage(out: &mut String, source_index: &SourceIndex, config: &Config) {
@@ -1082,7 +1283,7 @@ fn render_metrics(out: &mut String, source_index: &SourceIndex) {
         source_index.mentions.len()
     ));
     out.push_str(&format!(
-        "- structured receipts parsed: {}\n",
+        "- structured direct-source receipts recognized: {}\n",
         source_index.receipts.len()
     ));
     out.push_str(&format!(
@@ -1108,9 +1309,12 @@ struct ResurfacingCandidate {
     lifecycle: Option<String>,
     canonical_source_cursor: Option<i64>,
     reviewed_through_cursor: Option<i64>,
+    last_mentioned_cursor: Option<i64>,
     last_mentioned_year: Option<i64>,
+    last_mentioned_method: Option<String>,
     last_material_cursor: Option<i64>,
     last_material_year: Option<i64>,
+    last_material_method: Option<String>,
     frontier: Option<i64>,
     mention_delta: Option<i64>,
     material_delta: Option<i64>,
@@ -1129,9 +1333,9 @@ struct ReceiptOwed {
 
 struct CapabilityDormant {
     title: String,
+    capability_id: String,
     depth: Option<String>,
-    last_evidenced_use: Option<i64>,
-    use_classes: String,
+    edge_count: usize,
     record_path: String,
 }
 
@@ -1154,6 +1358,14 @@ fn format_material_cursor(cursor: Option<i64>, year: Option<i64>) -> String {
         (Some(cursor), None) => format!("cursor {cursor}"),
         (None, _) => "—".to_string(),
     }
+}
+
+fn format_cursor_method(cursor: Option<i64>, year: Option<i64>, method: Option<&str>) -> String {
+    let mut rendered = format_material_cursor(cursor, year);
+    if let Some(method) = method {
+        rendered.push_str(&format!(" [{method}]"));
+    }
+    rendered
 }
 
 fn yaml_escape(s: &str) -> String {

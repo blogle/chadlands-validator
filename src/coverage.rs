@@ -92,6 +92,7 @@ fn looks_like_stable_id(s: &str) -> bool {
         || s.starts_with("capability:")
         || s.starts_with("portfolio:")
         || s.starts_with("int-")
+        || s.starts_with("int_")
         || s.starts_with("TR-")
         || s.starts_with("CAP-")
         || s.starts_with("TP-")
@@ -173,6 +174,7 @@ mod tests {
         assert!(looks_like_stable_id("CAP-WATER-POWER"));
         assert!(looks_like_stable_id("TP-Y36-01"));
         assert!(looks_like_stable_id("TN-001"));
+        assert!(looks_like_stable_id("int_0838"));
         assert!(!looks_like_stable_id("hello"));
         assert!(!looks_like_stable_id("Mara Kest"));
     }

@@ -324,8 +324,8 @@ static RULES: &[RuleMeta] = &[
     ),
     rule!(
         "CHAD-TECH-010",
-        "attained capability missing required fields",
-        "Add the missing `depth`, `custody`, or `owner` field to the capability's frontmatter.",
+        "active durable capability missing structured capability_state",
+        "Add a supported `capability_state` only when canonical structured evidence establishes it; do not infer it from lifecycle prose.",
         63
     ),
     // --- 12: receipt monitoring ---

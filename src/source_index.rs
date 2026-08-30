@@ -51,6 +51,20 @@ pub enum ActivityEvidenceKind {
     StructuredReceipt,
     /// Lifecycle event recognized from direct source (Patch 3+).
     ExactLifecycleSourceEvent,
+    /// Canonical vault record structured fields (for contradiction evidence).
+    CanonicalRecord,
+}
+
+impl ActivityEvidenceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::CanonicalSourceCursor => "canonical-source-cursor",
+            Self::ExactIdentityMention => "exact-identity-mention",
+            Self::StructuredReceipt => "structured-receipt",
+            Self::ExactLifecycleSourceEvent => "exact-lifecycle-source-event",
+            Self::CanonicalRecord => "canonical-record",
+        }
+    }
 }
 
 /// Where an activity evidence cursor was observed.
@@ -309,10 +323,14 @@ pub fn build_identity_dict(index: &VaultIndex, config: &Config) -> Vec<KnownIden
             continue;
         }
         let fm = note.fm();
-        let canonical_id = config
-            .id_fields
-            .iter()
-            .find_map(|f| fm.get_str(f))
+        let typed_id = match type_name.as_str() {
+            "technology-road" => fm.get_str("road_id"),
+            "technology-portfolio" => fm.get_str("portfolio_id"),
+            "capability" => fm.get_str("capability_id"),
+            _ => None,
+        };
+        let canonical_id = typed_id
+            .or_else(|| config.id_fields.iter().find_map(|f| fm.get_str(f)))
             .or_else(|| fm.get_str("road_id"))
             .or_else(|| fm.get_str("capability_id"))
             .or_else(|| fm.get_str("portfolio_id"))
@@ -320,7 +338,22 @@ pub fn build_identity_dict(index: &VaultIndex, config: &Config) -> Vec<KnownIden
             .filter(|s| !s.is_empty());
 
         let title = note.title().to_string();
-        let aliases = fm.get_list("aliases");
+        let mut aliases = fm.get_list("aliases");
+        for field in config.id_fields.iter().map(String::as_str).chain([
+            "road_id",
+            "capability_id",
+            "portfolio_id",
+        ]) {
+            if let Some(value) = fm.get_str(field) {
+                let value = value.trim().to_string();
+                if !value.is_empty()
+                    && canonical_id.as_deref() != Some(value.as_str())
+                    && !aliases.contains(&value)
+                {
+                    aliases.push(value);
+                }
+            }
+        }
 
         // Generate the internal key
         let key = canonical_id
@@ -970,9 +1003,10 @@ pub fn extract_candidates(
 
 fn is_stable_id_syntax(s: &str) -> bool {
     // TR-*, CAP-*, TP-* patterns
-    (s.starts_with("TR-") || s.starts_with("CAP-") || s.starts_with("TP-"))
+    ((s.starts_with("TR-") || s.starts_with("CAP-") || s.starts_with("TP-"))
         && s.len() > 3
-        && s[3..].chars().all(|c| c.is_alphanumeric() || c == '-')
+        && s[3..].chars().all(|c| c.is_alphanumeric() || c == '-'))
+        || (s.starts_with("int_") && s.len() > 4 && s[4..].chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Detect ALL-CAPS protocol/status prose that is unlikely to be a durable
@@ -1507,6 +1541,7 @@ mod tests {
         assert!(is_stable_id_syntax("TR-STEAM"));
         assert!(is_stable_id_syntax("CAP-WATER-POWER"));
         assert!(is_stable_id_syntax("TP-Y36-01"));
+        assert!(is_stable_id_syntax("int_0838"));
         assert!(!is_stable_id_syntax("hello"));
         assert!(!is_stable_id_syntax("TR-"));
     }

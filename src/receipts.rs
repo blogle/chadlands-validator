@@ -18,8 +18,43 @@ pub struct RoadReceiptState {
     pub last_progress_at: Option<i64>,
     pub terminal: bool,
     pub terminal_result: Option<String>,
+    /// All terminal receipts in order (for conflict detection).
+    pub terminal_receipts: Vec<TerminalReceipt>,
     pub partial_components: Vec<String>,
     pub resolved_components: HashSet<String>,
+}
+
+/// A single terminal receipt with its result and cursor.
+#[derive(Debug, Clone)]
+pub struct TerminalReceipt {
+    pub result: Option<String>,
+    pub cursor: i64,
+    pub source_file: String,
+    pub line: usize,
+}
+
+impl RoadReceiptState {
+    /// Returns true if there are multiple terminal receipts with incompatible
+    /// polarity (e.g. success + failure). Compatible repeated receipts
+    /// (success + success) are not conflicts.
+    pub fn has_terminal_conflict(&self) -> bool {
+        if self.terminal_receipts.len() < 2 {
+            return false;
+        }
+        let has_success = self.terminal_receipts.iter().any(|r| {
+            matches!(
+                r.result.as_deref(),
+                Some("SUCCESS") | Some("COMPLETED") | Some("CLOSED_SUCCEEDED")
+            )
+        });
+        let has_failure = self.terminal_receipts.iter().any(|r| {
+            matches!(
+                r.result.as_deref(),
+                Some("FAILURE") | Some("FAILED") | Some("CLOSED_FAILED") | Some("TERMINAL")
+            )
+        });
+        has_success && has_failure
+    }
 }
 
 /// Build road receipt states from parsed receipts.
@@ -67,7 +102,14 @@ pub fn build_road_states(receipts: &[ParsedReceipt]) -> HashMap<String, RoadRece
             }
             "TERMINAL" => {
                 state.terminal = true;
-                state.terminal_result = receipt.fields.get("result").map(|s| s.to_uppercase());
+                let result = receipt.fields.get("result").map(|s| s.to_uppercase());
+                state.terminal_result = result.clone();
+                state.terminal_receipts.push(TerminalReceipt {
+                    result,
+                    cursor: receipt.cursor,
+                    source_file: receipt.source_file.clone(),
+                    line: receipt.line,
+                });
                 if state.started_at.is_none() {
                     state.started_at = Some(receipt.cursor);
                 }
@@ -325,6 +367,26 @@ mod tests {
         }
     }
 
+    fn make_receipt_with_result(
+        receipt_type: &str,
+        road: &str,
+        cursor: i64,
+        result: &str,
+    ) -> ParsedReceipt {
+        let mut fields = HashMap::new();
+        fields.insert("road".to_string(), road.to_string());
+        fields.insert("result".to_string(), result.to_string());
+        ParsedReceipt {
+            receipt_type: receipt_type.to_string(),
+            fields,
+            source_file: "test.md".to_string(),
+            cursor,
+            speaker: "bot".to_string(),
+            speaker_class: SpeakerClass::Dm,
+            line: 1,
+        }
+    }
+
     #[test]
     fn road_state_basic_flow() {
         let receipts = vec![
@@ -357,5 +419,51 @@ mod tests {
         let states = build_road_states(&receipts);
         let state = states.get("TR-STEAM").unwrap();
         assert_eq!(state.partial_components.len(), 3);
+    }
+
+    #[test]
+    fn incompatible_terminal_receipts_preserved() {
+        // Success at 5000, failure at 5100 → conflict preserved
+        let receipts = vec![
+            make_receipt_with_result("TERMINAL", "TR-TEST", 5000, "SUCCESS"),
+            make_receipt_with_result("TERMINAL", "TR-TEST", 5100, "FAILURE"),
+        ];
+        let states = build_road_states(&receipts);
+        let state = states.get("TR-TEST").unwrap();
+        assert!(
+            state.has_terminal_conflict(),
+            "success + failure must be detected as conflict"
+        );
+        assert_eq!(state.terminal_receipts.len(), 2);
+    }
+
+    #[test]
+    fn compatible_terminal_receipts_no_conflict() {
+        // Success at 5000, success at 5100 → no conflict
+        let receipts = vec![
+            make_receipt_with_result("TERMINAL", "TR-TEST", 5000, "SUCCESS"),
+            make_receipt_with_result("TERMINAL", "TR-TEST", 5100, "SUCCESS"),
+        ];
+        let states = build_road_states(&receipts);
+        let state = states.get("TR-TEST").unwrap();
+        assert!(
+            !state.has_terminal_conflict(),
+            "success + success must not be conflict"
+        );
+    }
+
+    #[test]
+    fn failure_then_success_conflict() {
+        // Failure at 5000, success at 5100 → conflict preserved
+        let receipts = vec![
+            make_receipt_with_result("TERMINAL", "TR-TEST", 5000, "FAILURE"),
+            make_receipt_with_result("TERMINAL", "TR-TEST", 5100, "SUCCESS"),
+        ];
+        let states = build_road_states(&receipts);
+        let state = states.get("TR-TEST").unwrap();
+        assert!(
+            state.has_terminal_conflict(),
+            "failure + success must be detected as conflict"
+        );
     }
 }

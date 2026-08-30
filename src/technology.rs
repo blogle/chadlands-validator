@@ -380,7 +380,7 @@ fn check_relationships(ctx: &RuleContext, out: &mut Vec<Finding>) {
 }
 
 // ---------------------------------------------------------------------------
-// CHAD-TECH-010: attained capability required fields
+// CHAD-TECH-010: active durable capability missing structured state
 // ---------------------------------------------------------------------------
 
 fn check_attained_capabilities(ctx: &RuleContext, out: &mut Vec<Finding>) {
@@ -391,38 +391,65 @@ fn check_attained_capabilities(ctx: &RuleContext, out: &mut Vec<Finding>) {
         if domain::kind_for_note(note, ctx.config) != domain::EntityKind::Capability {
             continue;
         }
-        let lifecycle = note.fm().get_str("lifecycle").unwrap_or_default();
-        let lower = lifecycle.to_ascii_lowercase();
-        let is_attained =
-            lower.starts_with("attained") || lower == "reproduced" || lower == "diffused";
-        if !is_attained {
+        if note.status().as_deref() != Some("active") {
             continue;
         }
 
         let fm = note.fm();
-        let has_depth = fm.get_str("depth").is_some();
-        let has_custody = fm.get_str("custody").is_some();
-        let has_owner = fm.get_str("owner").is_some() || fm.get_str("lead").is_some();
-
-        if !has_depth || !has_custody || !has_owner {
-            let missing: Vec<&str> = [
-                (!has_depth).then_some("depth"),
-                (!has_custody).then_some("custody"),
-                (!has_owner).then_some("owner"),
-            ]
-            .into_iter()
-            .flatten()
-            .collect();
-
+        let parsed_state = crate::frontmatter::parse_capability_states(&fm);
+        if !parsed_state.field_present || parsed_state.valid.is_empty() {
+            // Missing or empty capability_state
+            let detail = if parsed_state.field_present && !parsed_state.invalid.is_empty() {
+                format!(
+                    " field has invalid values: [{}]",
+                    parsed_state.invalid.join(", ")
+                )
+            } else {
+                String::new()
+            };
             out.push(finding(
                 "CHAD-TECH-010",
                 ctx.sev("CHAD-TECH-010", crate::findings::Severity::Warn),
                 Some(&note.path),
                 format!(
-                    "attained capability `{}` is missing required fields: {}. \
-                     Add them to the frontmatter.",
+                    "active durable capability `{}` is missing structured \
+                     `capability_state`; lifecycle prose is not used as a substitute.{detail}",
+                    note.title()
+                ),
+            ));
+        } else if !parsed_state.invalid.is_empty() {
+            // Has valid states but also invalid ones — surface as schema debt
+            out.push(finding(
+                "CHAD-TECH-010",
+                ctx.sev("CHAD-TECH-010", crate::findings::Severity::Warn),
+                Some(&note.path),
+                format!(
+                    "active durable capability `{}` has invalid `capability_state` \
+                     values: [{}]. Valid vocabulary: attained, reproduced, diffused, \
+                     exploited, compounded, superseded, lost.",
                     note.title(),
-                    missing.join(", ")
+                    parsed_state.invalid.join(", ")
+                ),
+            ));
+        } else if parsed_state.valid.contains(&"lost") || parsed_state.valid.contains(&"superseded")
+        {
+            // Active status conflicts with terminal capability state
+            let terminal_states: Vec<&str> = parsed_state
+                .valid
+                .iter()
+                .filter(|s| matches!(**s, "lost" | "superseded"))
+                .copied()
+                .collect();
+            out.push(finding(
+                "CHAD-TECH-010",
+                ctx.sev("CHAD-TECH-010", crate::findings::Severity::Warn),
+                Some(&note.path),
+                format!(
+                    "active durable capability `{}` has `status: active` but \
+                     `capability_state` contains terminal state(s) [{}]; \
+                     active status conflicts with terminal capability state.",
+                    note.title(),
+                    terminal_states.join(", ")
                 ),
             ));
         }
@@ -504,14 +531,16 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
             continue;
         }
         let kind = domain::kind_for_note(note, ctx.config);
-        let execution = domain::execution_state_for_note(note);
         if !matches!(
             kind,
             domain::EntityKind::Project | domain::EntityKind::Venture
         ) {
             continue;
         }
-        if domain::execution_state_for_kind(kind, execution) == domain::ExecutionState::Terminal {
+        if matches!(
+            note.status().as_deref(),
+            Some("completed" | "closed" | "failed" | "superseded" | "resolved")
+        ) {
             continue;
         }
 
@@ -560,16 +589,35 @@ fn check_legacy_portfolios(ctx: &RuleContext, out: &mut Vec<Finding>) {
         }
     }
 
-    if modern.legacy_entity_count > 0 {
+    let blocking_legacy = ctx
+        .index
+        .notes
+        .iter()
+        .filter(|note| {
+            note.curated
+                && note.parse_error.is_none()
+                && ctx
+                    .config
+                    .legacy_technology_types
+                    .contains(&note.type_str().unwrap_or_default())
+                && {
+                    let classes = legacy_classifications(&note.fm());
+                    classes.is_empty()
+                        || (note.status().as_deref() == Some("active")
+                            && classes
+                                != vec![LegacyTechnologyClassification::HistoricalCompatibility])
+                }
+        })
+        .count();
+    if blocking_legacy > 0 {
         out.push(finding(
             "TECH-MIG-006",
             ctx.sev("TECH-MIG-006", crate::findings::Severity::Warn),
             None,
             format!(
-                "legacy technology representation is not ratcheted to zero: \
-                 {} legacy record(s) remain. Replace or migrate each legacy \
-                 node to a modern portfolio, road, or capability record.",
-                modern.legacy_entity_count,
+                "{blocking_legacy} legacy technology record(s) remain unresolved \
+                 or still serve as current machine-readable truth and block monitoring. \
+                 Classify historical compatibility records or migrate current truth.",
             ),
         ));
     }
